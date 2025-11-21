@@ -75,3 +75,4 @@ with open('motobike_price_model.pkl', 'wb') as f:
     pickle.dump(model, f)
 
 print("Model saved to motobike_price_model.pkl")
+
