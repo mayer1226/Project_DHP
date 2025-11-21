@@ -44,7 +44,7 @@ num_transformer = Pipeline(steps=[
 ])
 
 cat_transformer = Pipeline(steps=[
-    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse=False))
+    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
 ])
 
 preprocessor = ColumnTransformer(transformers=[
@@ -73,4 +73,5 @@ print("5-fold RMSE:", -scores.mean())
 import pickle
 with open('motobike_price_model.pkl', 'wb') as f:
     pickle.dump(model, f)
+
 print("Model saved to motobike_price_model.pkl")
