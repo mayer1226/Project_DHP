@@ -1,0 +1,12 @@
+*.pyc
+__pycache__/
+.env
+*.xlsx
+*.xls
+.streamlit/
+venv/
+env/
+.venv/
+*.db
+*.sqlite
+.DS_Store
