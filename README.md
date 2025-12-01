@@ -179,7 +179,5 @@ streamlit run app.py
 - Check logs trong Render Dashboard nếu có lỗi deployment
 - Review database connection nếu app không load được
 
-## 📄 License
 
-Internal LEGO Manufacturing Tool - Not for public distribution
 
