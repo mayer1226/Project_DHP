@@ -1,6 +1,6 @@
 # 🔄 Hệ Thống Bàn Giao Ca Làm Việc Trên Line
 
-Ứng dụng quản lý bàn giao ca làm việc cho LEGO Manufacturing, hỗ trợ giao ca và nhận ca với khả năng xử lý đồng thời nhiều người dùng.
+Ứng dụng quản lý bàn giao ca làm việc, hỗ trợ giao ca và nhận ca với khả năng xử lý đồng thời nhiều người dùng.
 
 ## 🌟 Tính Năng
 
@@ -182,3 +182,4 @@ streamlit run app.py
 ## 📄 License
 
 Internal LEGO Manufacturing Tool - Not for public distribution
+
