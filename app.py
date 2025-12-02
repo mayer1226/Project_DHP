@@ -194,7 +194,7 @@ def main():
     st.markdown("---")
     
     # Tabs cho các chức năng
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📤 Giao Ca", "📥 Nhận Ca", "⚙️ Cài Đặt"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "📤 Giao Ca", "📥 Nhận Ca", "📋 Xem Dữ Liệu", "⚙️ Cài Đặt"])
     
     # TAB 0: DASHBOARD
     with tab1:
@@ -555,7 +555,8 @@ def main():
                     st.success(f"✅ Thông tin nhân viên hợp lệ: **{ma_nv_giao}** - **{ten_nv_giao}**")
                     
                     st.markdown("### 📋 Thông Tin Các Hạng Mục")
-                    st.caption("⚠️ Bắt buộc điền đầy đủ trạng thái và comment cho tất cả các mục (trừ mục 'Khác')")
+                    st.caption("⚠️ Bắt buộc chọn trạng thái cho tất cả các mục (trừ mục 'Khác')")
+                    st.caption("💡 Ghi chú bắt buộc khi trạng thái là NOK hoặc NA, tùy chọn khi OK")
                     
             handover_data = {}
             
@@ -636,9 +637,12 @@ def main():
                     if status_key not in handover_data or not handover_data[status_key]:
                         errors.append(f"❌ Chưa chọn trạng thái cho **{category}**")
                     
-                    # Kiểm tra comment (bắt buộc nếu có trạng thái)
-                    if comment_key not in handover_data or not handover_data[comment_key].strip():
-                        errors.append(f"❌ Chưa nhập ghi chú cho **{category}**")
+                    # Kiểm tra comment (chỉ bắt buộc nếu trạng thái là NOK hoặc NA, không bắt buộc nếu OK)
+                    status = handover_data.get(status_key, "")
+                    comment = handover_data.get(comment_key, "").strip()
+                    
+                    if status in ["NOK", "NA"] and not comment:
+                        errors.append(f"❌ Chưa nhập ghi chú cho **{category}** (bắt buộc khi trạng thái {status})")
                 
                 return errors
             
@@ -1082,8 +1086,150 @@ Vui lòng làm mới trang và thử lại.
                                 else:
                                     st.error(f"❌ Lỗi khi lưu dữ liệu: {message}")
     
-    # TAB 3: CÀI ĐẶT (Bao gồm cả Xem Dữ Liệu)
+    # TAB 4: XEM DỮ LIỆU
     with tab4:
+        st.header("📋 Xem Dữ Liệu Bàn Giao Ca")
+        
+        # Tạo sub-tabs cho Giao Ca và Nhận Ca
+        view_tab1, view_tab2 = st.tabs(["📤 Dữ Liệu Giao Ca", "📥 Dữ Liệu Nhận Ca"])
+        
+        # SUB-TAB 1: Dữ liệu Giao Ca
+        with view_tab1:
+            st.subheader("📤 Lịch Sử Giao Ca")
+            
+            try:
+                data = get_handover_data_for_export()
+                if data:
+                    df = pd.DataFrame(data)
+                    
+                    # Bộ lọc
+                    col_filter1, col_filter2, col_filter3 = st.columns(3)
+                    
+                    with col_filter1:
+                        # Lọc theo Line
+                        unique_lines = ['Tất cả'] + sorted(df['Line'].unique().tolist())
+                        selected_line = st.selectbox("🏭 Lọc theo Line", unique_lines, key="view_handover_line")
+                    
+                    with col_filter2:
+                        # Lọc theo Ca
+                        unique_shifts = ['Tất cả'] + sorted(df['Ca'].unique().tolist())
+                        selected_shift = st.selectbox("⏰ Lọc theo Ca", unique_shifts, key="view_handover_shift")
+                    
+                    with col_filter3:
+                        # Lọc theo Trạng thái
+                        status_options = ['Tất cả', 'Đã nhận', 'Chưa nhận']
+                        selected_status = st.selectbox("📊 Lọc theo Trạng thái", status_options, key="view_handover_status")
+                    
+                    # Áp dụng bộ lọc
+                    filtered_df = df.copy()
+                    if selected_line != 'Tất cả':
+                        filtered_df = filtered_df[filtered_df['Line'] == selected_line]
+                    if selected_shift != 'Tất cả':
+                        filtered_df = filtered_df[filtered_df['Ca'] == selected_shift]
+                    if selected_status != 'Tất cả':
+                        filtered_df = filtered_df[filtered_df['Trạng Thái Nhận'] == selected_status]
+                    
+                    # Hiển thị thống kê
+                    st.markdown("---")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("📋 Tổng số bàn giao", len(filtered_df))
+                    with col2:
+                        received_count = len(filtered_df[filtered_df['Trạng Thái Nhận'] == 'Đã nhận'])
+                        st.metric("✅ Đã nhận", received_count)
+                    with col3:
+                        pending_count = len(filtered_df[filtered_df['Trạng Thái Nhận'] == 'Chưa nhận'])
+                        st.metric("⏳ Chưa nhận", pending_count)
+                    with col4:
+                        # Đếm NOK trong các cột status
+                        nok_count = 0
+                        for cat in CATEGORIES:
+                            col_name = f'{cat} - Tình Trạng'
+                            if col_name in filtered_df.columns:
+                                nok_count += (filtered_df[col_name] == 'NOK').sum()
+                        st.metric("🔴 Tổng NOK", nok_count)
+                    
+                    st.markdown("---")
+                    
+                    # Hiển thị bảng dữ liệu
+                    st.dataframe(
+                        filtered_df,
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    st.caption(f"Hiển thị **{len(filtered_df)}** / **{len(df)}** bản ghi")
+                    
+                else:
+                    st.info("📌 Chưa có dữ liệu giao ca")
+            except Exception as e:
+                st.error(f"❌ Lỗi khi đọc dữ liệu: {e}")
+        
+        # SUB-TAB 2: Dữ liệu Nhận Ca
+        with view_tab2:
+            st.subheader("📥 Lịch Sử Nhận Ca")
+            
+            try:
+                data = get_receive_data_for_export()
+                if data:
+                    df = pd.DataFrame(data)
+                    
+                    # Bộ lọc
+                    col_filter1, col_filter2 = st.columns(2)
+                    
+                    with col_filter1:
+                        # Lọc theo Line
+                        unique_lines = ['Tất cả'] + sorted(df['Line'].unique().tolist())
+                        selected_line = st.selectbox("🏭 Lọc theo Line", unique_lines, key="view_receive_line")
+                    
+                    with col_filter2:
+                        # Lọc theo Ca
+                        unique_shifts = ['Tất cả'] + sorted(df['Ca'].unique().tolist())
+                        selected_shift = st.selectbox("⏰ Lọc theo Ca", unique_shifts, key="view_receive_shift")
+                    
+                    # Áp dụng bộ lọc
+                    filtered_df = df.copy()
+                    if selected_line != 'Tất cả':
+                        filtered_df = filtered_df[filtered_df['Line'] == selected_line]
+                    if selected_shift != 'Tất cả':
+                        filtered_df = filtered_df[filtered_df['Ca'] == selected_shift]
+                    
+                    # Hiển thị thống kê
+                    st.markdown("---")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("📋 Tổng số nhận ca", len(filtered_df))
+                    with col2:
+                        # Đếm số lượng xác nhận
+                        confirmed_count = 0
+                        for cat in CATEGORIES:
+                            col_name = f'{cat} - Xác Nhận'
+                            if col_name in filtered_df.columns:
+                                confirmed_count += (filtered_df[col_name] == 'Đã xác nhận').sum()
+                        st.metric("✅ Tổng xác nhận", confirmed_count)
+                    with col3:
+                        # Unique nhân viên
+                        unique_employees = filtered_df['Mã NV Nhận Ca'].nunique()
+                        st.metric("👥 Số nhân viên", unique_employees)
+                    
+                    st.markdown("---")
+                    
+                    # Hiển thị bảng dữ liệu
+                    st.dataframe(
+                        filtered_df,
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    st.caption(f"Hiển thị **{len(filtered_df)}** / **{len(df)}** bản ghi")
+                    
+                else:
+                    st.info("📌 Chưa có dữ liệu nhận ca")
+            except Exception as e:
+                st.error(f"❌ Lỗi khi đọc dữ liệu: {e}")
+    
+    # TAB 5: CÀI ĐẶT (Bao gồm cả Xuất Dữ Liệu)
+    with tab5:
         st.header("⚙️ Cài Đặt Hệ Thống")
         
         # Kiểm tra đăng nhập cho trang cài đặt
@@ -1126,8 +1272,8 @@ Vui lòng làm mới trang và thử lại.
             
             st.markdown("---")
             
-            # Tạo sub-tabs cho Cài đặt và Xem dữ liệu
-            sub_tab1, sub_tab2 = st.tabs(["🏭 Quản Lý Lines", "📈 Xem Dữ Liệu"])
+            # Tạo sub-tabs cho Cài đặt và Xuất dữ liệu
+            sub_tab1, sub_tab2 = st.tabs(["🏭 Quản Lý Lines", "📥 Xuất Dữ Liệu"])
             
             # SUB-TAB 1: Quản lý Lines
             with sub_tab1:
@@ -1174,112 +1320,96 @@ Vui lòng làm mới trang và thử lại.
                 except Exception as e:
                     st.error(f"❌ Lỗi khi tải cấu hình lines: {e}")
             
-            # SUB-TAB 2: Xem Dữ Liệu
+            # SUB-TAB 2: Xuất Dữ Liệu
             with sub_tab2:
-                st.subheader("📈 Dữ Liệu Bàn Giao Ca")
+                st.subheader("📥 Xuất Dữ Liệu Ra File")
                 
-                # Hiển thị thông tin giao ca mới nhất
-                st.markdown("### 🔥 Giao Ca Mới Nhất")
-                try:
-                    latest_handovers = get_latest_handovers_for_display(limit=5)
-                    if latest_handovers:
-                        for idx, row in enumerate(latest_handovers):
-                            # Xác định trạng thái
-                            status_badge = ""
-                            if row['Trạng Thái Nhận'] == "Đã nhận":
-                                status_badge = "✅ Đã nhận"
-                            else:
-                                status_badge = "⏳ Chưa nhận"
-                            
-                            with st.expander(f"📋 {row['ID Giao Ca']} - {row['Line']} - {row['Ca']} - {status_badge}", expanded=(idx == 0)):
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.write(f"**ID Giao Ca:** {row['ID Giao Ca']}")
-                                    st.write(f"**Mã NV:** {row['Mã NV Giao Ca']}")
-                                    st.write(f"**Tên NV:** {row['Tên NV Giao Ca']}")
-                                    st.write(f"**Nhân viên thuộc ca:** {row['Nhân viên thuộc ca']}")
-                                with col2:
-                                    st.write(f"**Line:** {row['Line']}")
-                                    st.write(f"**Ca:** {row['Ca']}")
-                                    st.write(f"**Ngày:** {row['Ngày Báo Cáo']}")
-                                    st.write(f"**Trạng thái:** {status_badge}")
-                                
-                                st.markdown("---")
-                                st.markdown("**Thông tin các hạng mục:**")
-                                
-                                for cat in CATEGORIES:
-                                    status = row.get(f"{cat} - Tình Trạng", "N/A")
-                                    comment = row.get(f"{cat} - Comments", "")
-                                    
-                                    # Color badge cho status
-                                    if status == "OK":
-                                        badge_color = "green"
-                                    elif status == "NOK":
-                                        badge_color = "red"
-                                    else:
-                                        badge_color = "gray"
-                                    
-                                    st.markdown(f"**{cat}:** :{badge_color}[{status}]")
-                                    if comment:
-                                        st.caption(f"📝 {comment}")
-                    else:
-                        st.info("Chưa có dữ liệu giao ca")
-                except Exception as e:
-                    st.error(f"Lỗi khi đọc dữ liệu: {e}")
+                st.info("💡 Tải xuống dữ liệu dưới dạng file CSV để phân tích hoặc lưu trữ")
                 
-                st.markdown("---")
-                st.markdown("---")
+                col1, col2 = st.columns(2)
                 
-                # Phần xem dữ liệu đầy đủ
-                st.markdown("### 📊 Xem Dữ Liệu Đầy Đủ")
-                
-                view_option = st.radio("Chọn loại dữ liệu:", 
-                                       ["Dữ liệu Giao Ca", "Dữ liệu Nhận Ca"],
-                                       horizontal=True,
-                                       key="data_view_option")
-                
-                if view_option == "Dữ liệu Giao Ca":
+                # Xuất dữ liệu Giao Ca
+                with col1:
+                    st.markdown("### 📤 Dữ Liệu Giao Ca")
                     try:
                         data = get_handover_data_for_export()
                         if data:
                             df = pd.DataFrame(data)
-                            st.dataframe(df, use_container_width=True)
+                            st.success(f"✅ Sẵn sàng xuất **{len(df)}** bản ghi")
+                            
+                            # Hiển thị preview
+                            with st.expander("👁️ Xem trước dữ liệu (5 dòng đầu)"):
+                                st.dataframe(df.head(), use_container_width=True)
                             
                             # Nút download
-                            col1, col2, col3 = st.columns([1, 2, 1])
-                            with col2:
-                                st.download_button(
-                                    "📥 Tải xuống dữ liệu Giao Ca (CSV)",
-                                    df.to_csv(index=False).encode('utf-8-sig'),
-                                    "handover_data.csv",
-                                    "text/csv",
-                                    use_container_width=True
-                                )
+                            st.download_button(
+                                "📥 Tải Xuống Dữ Liệu Giao Ca (CSV)",
+                                df.to_csv(index=False).encode('utf-8-sig'),
+                                f"handover_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                "text/csv",
+                                use_container_width=True,
+                                type="primary"
+                            )
                         else:
-                            st.info("Chưa có dữ liệu giao ca")
+                            st.info("📌 Chưa có dữ liệu giao ca để xuất")
                     except Exception as e:
-                        st.error(f"Lỗi khi đọc dữ liệu: {e}")
-                else:
+                        st.error(f"❌ Lỗi: {e}")
+                
+                # Xuất dữ liệu Nhận Ca
+                with col2:
+                    st.markdown("### 📥 Dữ Liệu Nhận Ca")
                     try:
                         data = get_receive_data_for_export()
                         if data:
                             df = pd.DataFrame(data)
-                            st.dataframe(df, use_container_width=True)
+                            st.success(f"✅ Sẵn sàng xuất **{len(df)}** bản ghi")
+                            
+                            # Hiển thị preview
+                            with st.expander("👁️ Xem trước dữ liệu (5 dòng đầu)"):
+                                st.dataframe(df.head(), use_container_width=True)
                             
                             # Nút download
-                            col1, col2, col3 = st.columns([1, 2, 1])
-                            with col2:
-                                st.download_button(
-                                    "📥 Tải xuống dữ liệu Nhận Ca (CSV)",
-                                    df.to_csv(index=False).encode('utf-8-sig'),
-                                    "receive_data.csv",
-                                    "text/csv",
-                                    use_container_width=True
-                                )
+                            st.download_button(
+                                "📥 Tải Xuống Dữ Liệu Nhận Ca (CSV)",
+                                df.to_csv(index=False).encode('utf-8-sig'),
+                                f"receive_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                "text/csv",
+                                use_container_width=True,
+                                type="primary"
+                            )
                         else:
-                            st.info("Chưa có dữ liệu nhận ca")
+                            st.info("📌 Chưa có dữ liệu nhận ca để xuất")
                     except Exception as e:
-                        st.error(f"Lỗi khi đọc dữ liệu: {e}")
+                        st.error(f"❌ Lỗi: {e}")
+                
+                st.markdown("---")
+                
+                # Hướng dẫn sử dụng
+                with st.expander("ℹ️ Hướng Dẫn Sử Dụng File CSV"):
+                    st.markdown("""
+                    ### Cách Mở File CSV:
+                    
+                    1. **Microsoft Excel**:
+                       - Mở Excel → File → Open
+                       - Chọn file CSV đã tải
+                       - Dữ liệu sẽ tự động hiển thị trong các cột
+                    
+                    2. **Google Sheets**:
+                       - Truy cập Google Sheets
+                       - File → Import → Upload
+                       - Chọn file CSV
+                    
+                    3. **Python/Pandas**:
+                       ```python
+                       import pandas as pd
+                       df = pd.read_csv('handover_data.csv', encoding='utf-8-sig')
+                       ```
+                    
+                    ### Lưu Ý:
+                    - File CSV sử dụng encoding UTF-8 với BOM để hiển thị tiếng Việt chính xác
+                    - Tên file tự động thêm timestamp để tránh ghi đè
+                    - Dữ liệu được xuất theo định dạng gốc từ database
+                    """)
 
 if __name__ == "__main__":
     main()
