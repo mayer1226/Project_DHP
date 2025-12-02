@@ -466,3 +466,125 @@ def get_latest_handovers_for_display(limit=10):
     except Exception as e:
         print(f"Error getting latest handovers: {e}")
         return []
+
+# ===== COMBINED DATA OPERATIONS =====
+
+def get_combined_handover_receive_data(filter_date=None, filter_line=None):
+    """
+    Lấy dữ liệu kết hợp giao ca và nhận ca
+    Returns: list of dict với thông tin đầy đủ
+    """
+    try:
+        with get_db() as db:
+            # Query với left join để lấy cả handover chưa receive
+            from sqlalchemy.orm import aliased
+            
+            query = db.query(Handover, Receive).outerjoin(
+                Receive, Handover.handover_id == Receive.handover_id
+            )
+            
+            # Filter theo ngày nếu có
+            if filter_date:
+                query = query.filter(func.date(Handover.ngay_bao_cao) == filter_date)
+            
+            # Filter theo line nếu có
+            if filter_line and filter_line != "Tất cả":
+                query = query.filter(Handover.line == filter_line)
+            
+            # Sắp xếp theo thời gian giao ca
+            query = query.order_by(Handover.thoi_gian_giao_ca.desc())
+            
+            results = query.all()
+            
+            combined_data = []
+            for handover, receive in results:
+                # Đếm OK/NOK/NA
+                statuses = [handover.status_5s, handover.status_an_toan, 
+                           handover.status_chat_luong, handover.status_thiet_bi, 
+                           handover.status_ke_hoach, handover.status_khac]
+                ok_count = sum(1 for s in statuses if s == 'OK')
+                nok_count = sum(1 for s in statuses if s == 'NOK')
+                na_count = sum(1 for s in statuses if s == 'NA')
+                
+                data_row = {
+                    # Thông tin giao ca
+                    'ID Giao Ca': handover.handover_id,
+                    'Line': handover.line,
+                    'Ca': handover.ca,
+                    'Nhân viên thuộc ca': handover.nhan_vien_thuoc_ca,
+                    'Ngày Báo Cáo': handover.ngay_bao_cao,
+                    'Mã NV Giao': handover.ma_nv_giao_ca,
+                    'Tên NV Giao': handover.ten_nv_giao_ca,
+                    'Thời Gian Giao': handover.thoi_gian_giao_ca,
+                    'OK': ok_count,
+                    'NOK': nok_count,
+                    'NA': na_count,
+                    'Trạng Thái Nhận': handover.trang_thai_nhan,
+                    
+                    # Thông tin nhận ca (nếu có)
+                    'Mã NV Nhận': receive.ma_nv_nhan_ca if receive else None,
+                    'Tên NV Nhận': receive.ten_nv_nhan_ca if receive else None,
+                    'Thời Gian Nhận': receive.thoi_gian_nhan_ca if receive else None,
+                    'Ngày Nhận Ca': receive.ngay_nhan_ca if receive else None,
+                }
+                
+                combined_data.append(data_row)
+            
+            return combined_data
+    except Exception as e:
+        print(f"Error getting combined data: {e}")
+        return []
+
+# ===== ADMIN OPERATIONS =====
+
+def delete_handover_by_id(handover_id):
+    """
+    Xóa handover và receive liên quan (admin only)
+    Returns: (success: bool, message: str)
+    """
+    try:
+        with get_db() as db:
+            # Tìm handover
+            handover = db.query(Handover).filter(
+                Handover.handover_id == handover_id
+            ).first()
+            
+            if not handover:
+                return False, "Không tìm thấy bàn giao"
+            
+            # Xóa receive liên quan trước (nếu có)
+            db.query(Receive).filter(
+                Receive.handover_id == handover_id
+            ).delete()
+            
+            # Xóa handover
+            db.delete(handover)
+            
+            return True, f"Đã xóa bàn giao {handover_id}"
+            
+    except Exception as e:
+        print(f"Error deleting handover: {e}")
+        return False, str(e)
+
+def get_all_handovers_for_admin():
+    """Lấy tất cả handover cho admin quản lý"""
+    try:
+        with get_db() as db:
+            handovers = db.query(Handover).order_by(
+                Handover.thoi_gian_giao_ca.desc()
+            ).all()
+            
+            return [{
+                'ID Giao Ca': h.handover_id,
+                'Line': h.line,
+                'Ca': h.ca,
+                'Nhân viên thuộc ca': h.nhan_vien_thuoc_ca,
+                'Mã NV Giao': h.ma_nv_giao_ca,
+                'Tên NV Giao': h.ten_nv_giao_ca,
+                'Ngày Báo Cáo': h.ngay_bao_cao,
+                'Thời Gian Giao': h.thoi_gian_giao_ca,
+                'Trạng Thái Nhận': h.trang_thai_nhan,
+            } for h in handovers]
+    except Exception as e:
+        print(f"Error getting all handovers: {e}")
+        return []
