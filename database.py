@@ -10,7 +10,7 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Render sử dụng 'postgres://' nhưng SQLAlchemy cần 'postgresql://'
 if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
-    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql+psycopg://', 1)
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql+psycopg2://', 1)
 
 # Fallback cho local development
 if not DATABASE_URL:
@@ -165,4 +165,5 @@ def init_db():
     except Exception as e:
         print(f"Error initializing database: {e}")
         return False
+
 
