@@ -789,10 +789,10 @@ def main():
                                            index=0,
                                            help="Chọn ca làm việc của nhân viên")
                 
-                ngay_nhan = st.date_input("Ngày Làm Việc *", 
+                ngay_nhan = st.date_input("Ngày giao ca *", 
                                           value=datetime.now(),
                                           key="ngay_nhan",
-                                          help="Chọn ngày làm việc")
+                                          help="Chọn ngày nhân viên ca trước đó thực hiện giao ca")
             
             # Kiểm tra thay đổi Line hoặc Ngày
             if 'prev_line_nhan' not in st.session_state:
@@ -1729,3 +1729,4 @@ Vui lòng làm mới trang và thử lại.
 
 if __name__ == "__main__":
     main()
+
