@@ -910,3 +910,10 @@ def get_receive_data_for_export():
     except Exception as e:
         print(f"Error getting receive export data: {e}")
         return []
+
+def get_latest_handovers_for_display(line=None, limit=5):
+    """
+    Get latest handovers for display (legacy compatibility function)
+    Uses get_pending_handovers underneath
+    """
+    return get_pending_handovers(line=line, limit=limit)
