@@ -527,3 +527,93 @@ def get_latest_handovers_for_display(limit=10):
     except Exception as e:
         print(f"Error getting latest handovers: {e}")
         return []
+        
+def get_combined_handover_receive_data(from_date, to_date, line_filter=None, status_filter=None):
+    """
+    Lấy dữ liệu tổng hợp giao ca và nhận ca
+    
+    Args:
+        from_date: Ngày bắt đầu (YYYY-MM-DD)
+        to_date: Ngày kết thúc (YYYY-MM-DD)
+        line_filter: Lọc theo line (None = tất cả)
+        status_filter: Lọc theo trạng thái (None = tất cả, "Đã nhận", "Chưa nhận")
+    
+    Returns:
+        List of dict chứa thông tin tổng hợp
+    """
+    try:
+        with get_db() as db:
+            # Query handovers với LEFT JOIN receives
+            query = db.query(
+                Handover.handover_id,
+                Handover.ngay_bao_cao,
+                Handover.thoi_gian_giao_ca,
+                Handover.line,
+                Handover.ca,
+                Handover.nhan_vien_thuoc_ca,
+                Handover.ma_nv_giao_ca,
+                Handover.ten_nv_giao_ca,
+                Handover.trang_thai_nhan,
+                Handover.status_5s,
+                Handover.status_an_toan,
+                Handover.status_chat_luong,
+                Handover.status_thiet_bi,
+                Handover.status_ke_hoach,
+                Handover.status_khac,
+                Receive.ma_nv_nhan_ca,
+                Receive.ten_nv_nhan_ca,
+                Receive.thoi_gian_nhan_ca
+            ).outerjoin(
+                Receive, Handover.handover_id == Receive.handover_id
+            ).filter(
+                and_(
+                    func.date(Handover.ngay_bao_cao) >= from_date,
+                    func.date(Handover.ngay_bao_cao) <= to_date
+                )
+            )
+            
+            # Áp dụng filter
+            if line_filter:
+                query = query.filter(Handover.line == line_filter)
+            
+            if status_filter:
+                query = query.filter(Handover.trang_thai_nhan == status_filter)
+            
+            # Sắp xếp theo thời gian giao ca giảm dần
+            query = query.order_by(Handover.thoi_gian_giao_ca.desc())
+            
+            results = query.all()
+            
+            # Convert to list of dict
+            combined_data = []
+            for row in results:
+                # Đếm OK/NOK/NA
+                statuses = [row.status_5s, row.status_an_toan, row.status_chat_luong,
+                           row.status_thiet_bi, row.status_ke_hoach, row.status_khac]
+                ok_count = sum(1 for s in statuses if s == 'OK')
+                nok_count = sum(1 for s in statuses if s == 'NOK')
+                na_count = sum(1 for s in statuses if s == 'NA')
+                
+                combined_data.append({
+                    'ID Giao Ca': row.handover_id,
+                    'Ngày Giao': row.ngay_bao_cao,
+                    'Thời Gian Giao': row.thoi_gian_giao_ca,
+                    'Line': row.line,
+                    'Ca': row.ca,
+                    'Nhóm': row.nhan_vien_thuoc_ca,
+                    'Mã NV Giao': row.ma_nv_giao_ca,
+                    'Tên NV Giao': row.ten_nv_giao_ca,
+                    'Số OK': ok_count,
+                    'Số NOK': nok_count,
+                    'Số NA': na_count,
+                    'Trạng Thái Nhận': row.trang_thai_nhan,
+                    'Mã NV Nhận': row.ma_nv_nhan_ca if row.ma_nv_nhan_ca else '',
+                    'Tên NV Nhận': row.ten_nv_nhan_ca if row.ten_nv_nhan_ca else '',
+                    'Thời Gian Nhận': row.thoi_gian_nhan_ca if row.thoi_gian_nhan_ca else None
+                })
+            
+            return combined_data
+            
+    except Exception as e:
+        print(f"Error getting combined data: {e}")
+        return []
