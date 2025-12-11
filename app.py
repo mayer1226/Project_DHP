@@ -26,6 +26,12 @@ from db_operations import (
 # Cấu hình trang
 st.set_page_config(page_title="Hệ thống Bàn Giao Ca", page_icon="🔄", layout="wide")
 
+# Cached function để tối ưu performance
+@st.cache_data(ttl=300)  # Cache 5 phút
+def get_active_lines_cached():
+    """Cached version of get_active_lines() để tránh query DB nhiều lần"""
+    return get_active_lines()
+
 # Custom CSS cho status colors và styling
 st.markdown("""
 <style>
@@ -217,7 +223,7 @@ def main():
         with col_filter2:
             filter_line = st.selectbox(
                 "🏭 Lọc theo Line",
-                ["Tất cả"] + get_active_lines(),
+                ["Tất cả"] + get_active_lines_cached(),
                 key="dashboard_filter_line"
             )
         
@@ -494,7 +500,7 @@ def main():
             
             with col1:
                 ma_nv_giao = st.text_input("Mã Nhân Viên * (6 chữ số)", key="ma_nv_giao", value="", max_chars=6, placeholder="Ví dụ: 123456")
-                active_lines = get_active_lines()
+                active_lines = get_active_lines_cached()
                 line_giao = st.selectbox("Line Làm Việc *", 
                                          active_lines,
                                          key="line_giao",
@@ -676,7 +682,12 @@ def main():
                             nok_details = "Không có"
                         
                         # Lưu dữ liệu vào database
-                        handover_id = generate_handover_id()
+                        try:
+                            handover_id = generate_handover_id()
+                        except Exception as e:
+                            st.error(f"❌ Lỗi tạo ID giao ca: {str(e)}")
+                            st.stop()
+                        
                         data = {
                             'handover_id': handover_id,
                             'ma_nv': ma_nv_giao,
@@ -688,7 +699,8 @@ def main():
                             **handover_data
                         }
                         
-                        success, result = save_handover_safe(data)
+                        with st.spinner('Đang lưu thông tin giao ca...'):
+                            success, result, error_detail = save_handover_safe(data)
                         if success:
                             # Lưu thông tin vào session state để hiển thị sau khi rerun
                             st.session_state.handover_success = True
@@ -709,7 +721,9 @@ def main():
                             }
                             st.rerun()
                         else:
-                            st.error(f"❌ Lỗi khi lưu dữ liệu: {result}")
+                            # Hiển thị error message chi tiết từ save_handover_safe
+                            error_msg = error_detail if error_detail else result
+                            st.error(f"❌ {error_msg}")
 
     
     # TAB 2: NHẬN CA
@@ -769,7 +783,7 @@ def main():
             
             with col1:
                 ma_nv_nhan = st.text_input("Mã Nhân Viên * (6 chữ số)", key="ma_nv_nhan", value="", max_chars=6, placeholder="Ví dụ: 123456")
-                active_lines = get_active_lines()
+                active_lines = get_active_lines_cached()
                 line_nhan = st.selectbox("Line Làm Việc *", 
                                          active_lines,
                                          key="line_nhan",
@@ -1062,7 +1076,8 @@ Vui lòng làm mới trang và thử lại.
                                     **receive_data
                                 }
                                 
-                                success, message = save_receive_safe(data, handover_id)
+                                with st.spinner('Đang lưu thông tin nhận ca...'):
+                                    success, message = save_receive_safe(data, handover_id)
                                 if success:
                                     # Lưu thông tin vào session state
                                     st.session_state.receive_success = True
@@ -1250,7 +1265,7 @@ Vui lòng làm mới trang và thử lại.
                 
                 with col_filter2:
                     # Lọc theo Line
-                    all_lines = get_active_lines()
+                    all_lines = get_active_lines_cached()
                     selected_line = st.selectbox(
                         "🏭 Lọc theo Line",
                         ["Tất cả"] + all_lines,
@@ -1552,7 +1567,7 @@ Vui lòng làm mới trang và thử lại.
                 with col_filter1:
                     search_line = st.selectbox(
                         "🏭 Lọc theo Line",
-                        ["Tất cả"] + get_active_lines(),
+                        ["Tất cả"] + get_active_lines_cached(),
                         key="admin_search_line"
                     )
                 
@@ -1729,5 +1744,4 @@ Vui lòng làm mới trang và thử lại.
 
 if __name__ == "__main__":
     main()
-
 
