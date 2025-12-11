@@ -1,36 +1,80 @@
 from database import get_db, Handover, Receive, User, Line
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, text
+from sqlalchemy.types import Date
 from datetime import datetime
 import time
+import uuid
 
 # ===== HANDOVER OPERATIONS =====
 
 def generate_handover_id():
     """
-    Tạo ID giao ca unique theo format: HO-YYYYMMDD-XXXX
-    Thread-safe với database lock
+    Tạo ID giao ca unique với PostgreSQL Advisory Lock
+    Format: HO-YYYYMMDD-XXXX (production) hoặc HO-timestamp-XXXX (fallback)
+    
+    Advisory Lock đảm bảo chỉ 1 process được generate ID tại 1 thời điểm
+    Tránh race condition khi nhiều user submit đồng thời
     """
+    LOCK_ID = 789456  # Unique lock ID cho function này
+    
     try:
         with get_db() as db:
-            today = datetime.now().strftime('%Y%m%d')
+            # Kiểm tra xem có phải PostgreSQL không
+            db_url = str(db.bind.url)
+            is_postgresql = 'postgresql' in db_url
             
-            # Đếm số handover trong ngày (với lock)
-            count = db.query(func.count(Handover.id)).filter(
-                Handover.handover_id.like(f'HO-{today}-%')
-            ).scalar()
+            if is_postgresql:
+                # PostgreSQL: Dùng Advisory Lock
+                try:
+                    # Acquire lock (blocking - chỉ 1 thread chạy tại 1 thời điểm)
+                    db.execute(text(f"SELECT pg_advisory_lock({LOCK_ID})"))
+                    
+                    today = datetime.now().strftime('%Y%m%d')
+                    
+                    # Đếm số handover trong ngày (an toàn vì có lock)
+                    count = db.query(func.count(Handover.id)).filter(
+                        Handover.handover_id.like(f'HO-{today}-%')
+                    ).scalar()
+                    
+                    new_id = f"HO-{today}-{(count + 1):04d}"
+                    
+                    # Release lock
+                    db.execute(text(f"SELECT pg_advisory_unlock({LOCK_ID})"))
+                    
+                    return new_id
+                    
+                except Exception as lock_error:
+                    # Nếu lỗi lock, fallback sang UUID
+                    print(f"Advisory lock failed: {lock_error}")
+                    # Release lock nếu có
+                    try:
+                        db.execute(text(f"SELECT pg_advisory_unlock({LOCK_ID})"))
+                    except:
+                        pass
             
-            return f"HO-{today}-{(count + 1):04d}"
+            # Fallback: SQLite hoặc PostgreSQL lock failed
+            # Dùng timestamp + UUID để đảm bảo unique tuyệt đối
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            random_suffix = uuid.uuid4().hex[:4].upper()
+            return f"HO-{timestamp}-{random_suffix}"
+            
     except Exception as e:
-        # Fallback nếu lỗi
-        import random
-        today = datetime.now().strftime('%Y%m%d')
-        random_num = random.randint(1000, 9999)
-        return f"HO-{today}-{random_num}"
+        print(f"Error generating handover ID: {e}")
+        # Ultimate fallback: microsecond timestamp
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        return f"HO-{timestamp}"
 
 def save_handover_safe(data):
     """
     Lưu handover với retry mechanism để xử lý concurrent access
-    Returns: (success: bool, result: str/id)
+    
+    Args:
+        data: dict chứa thông tin handover
+        
+    Returns: 
+        (success: bool, result: str/id)
+        - success=True: result là handover_id
+        - success=False: result là error message
     """
     max_retries = 3
     retry_delay = 0.1  # 100ms
@@ -49,18 +93,18 @@ def save_handover_safe(data):
                     ngay_bao_cao=datetime.strptime(data['ngay'], '%Y-%m-%d'),
                     thoi_gian_giao_ca=datetime.now(),
                     trang_thai_nhan='Chưa nhận',
-                    status_5s=data.get('5S - Tình Trạng'),
-                    comment_5s=data.get('5S - Comments'),
-                    status_an_toan=data.get('An Toàn - Tình Trạng'),
-                    comment_an_toan=data.get('An Toàn - Comments'),
-                    status_chat_luong=data.get('Chất Lượng - Tình Trạng'),
-                    comment_chat_luong=data.get('Chất Lượng - Comments'),
-                    status_thiet_bi=data.get('Thiết Bị - Tình Trạng'),
-                    comment_thiet_bi=data.get('Thiết Bị - Comments'),
-                    status_ke_hoach=data.get('Kế Hoạch - Tình Trạng'),
-                    comment_ke_hoach=data.get('Kế Hoạch - Comments'),
-                    status_khac=data.get('Khác - Tình Trạng'),
-                    comment_khac=data.get('Khác - Comments')
+                    status_5s=data.get('5S - Tình Trạng', ''),
+                    comment_5s=data.get('5S - Comments', ''),
+                    status_an_toan=data.get('An Toàn - Tình Trạng', ''),
+                    comment_an_toan=data.get('An Toàn - Comments', ''),
+                    status_chat_luong=data.get('Chất Lượng - Tình Trạng', ''),
+                    comment_chat_luong=data.get('Chất Lượng - Comments', ''),
+                    status_thiet_bi=data.get('Thiết Bị - Tình Trạng', ''),
+                    comment_thiet_bi=data.get('Thiết Bị - Comments', ''),
+                    status_ke_hoach=data.get('Kế Hoạch - Tình Trạng', ''),
+                    comment_ke_hoach=data.get('Kế Hoạch - Comments', ''),
+                    status_khac=data.get('Khác - Tình Trạng', ''),
+                    comment_khac=data.get('Khác - Comments', '')
                 )
                 
                 db.add(handover)
@@ -69,21 +113,31 @@ def save_handover_safe(data):
                 return True, handover.handover_id
                 
         except Exception as e:
+            error_msg = str(e)
+            
+            # Nếu là lỗi duplicate key, không retry
+            if 'duplicate key' in error_msg.lower() or 'unique constraint' in error_msg.lower():
+                return False, f"ID đã tồn tại. Vui lòng thử lại."
+            
+            # Các lỗi khác: retry
             if attempt < max_retries - 1:
                 time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
                 continue
             else:
-                return False, str(e)
+                return False, f"Lỗi sau {max_retries} lần thử: {error_msg}"
     
-    return False, "Max retries exceeded"
+    return False, "Vượt quá số lần thử tối đa"
 
 def get_latest_handover(line, work_date):
     """
     Lấy thông tin bàn giao gần nhất chưa được nhận
+    
     Args:
-        line: Tên line
-        work_date: datetime.date object
-    Returns: dict hoặc None
+        line: Tên line (str)
+        work_date: Ngày làm việc (datetime.date object)
+        
+    Returns: 
+        dict với thông tin bàn giao, hoặc None nếu không tìm thấy
     """
     try:
         with get_db() as db:
@@ -108,19 +162,20 @@ def get_latest_handover(line, work_date):
                 'Nhân viên thuộc ca': handover.nhan_vien_thuoc_ca,
                 'Ngày Báo Cáo': handover.ngay_bao_cao.date(),
                 'Thời Gian Giao Ca': handover.thoi_gian_giao_ca,
-                '5S - Tình Trạng': handover.status_5s,
+                '5S - Tình Trạng': handover.status_5s or '',
                 '5S - Comments': handover.comment_5s or '',
-                'An Toàn - Tình Trạng': handover.status_an_toan,
+                'An Toàn - Tình Trạng': handover.status_an_toan or '',
                 'An Toàn - Comments': handover.comment_an_toan or '',
-                'Chất Lượng - Tình Trạng': handover.status_chat_luong,
+                'Chất Lượng - Tình Trạng': handover.status_chat_luong or '',
                 'Chất Lượng - Comments': handover.comment_chat_luong or '',
-                'Thiết Bị - Tình Trạng': handover.status_thiet_bi,
+                'Thiết Bị - Tình Trạng': handover.status_thiet_bi or '',
                 'Thiết Bị - Comments': handover.comment_thiet_bi or '',
-                'Kế Hoạch - Tình Trạng': handover.status_ke_hoach,
+                'Kế Hoạch - Tình Trạng': handover.status_ke_hoach or '',
                 'Kế Hoạch - Comments': handover.comment_ke_hoach or '',
-                'Khác - Tình Trạng': handover.status_khac,
+                'Khác - Tình Trạng': handover.status_khac or '',
                 'Khác - Comments': handover.comment_khac or ''
             }
+            
     except Exception as e:
         print(f"Error getting latest handover: {e}")
         return None
@@ -128,7 +183,14 @@ def get_latest_handover(line, work_date):
 def check_handover_received(handover_id):
     """
     Kiểm tra xem bàn giao đã được nhận chưa
-    Returns: (is_received: bool, receive_info: dict/None)
+    
+    Args:
+        handover_id: ID của bàn giao
+        
+    Returns: 
+        (is_received: bool, receive_info: dict/None)
+        - is_received=True: receive_info chứa thông tin người nhận
+        - is_received=False: receive_info=None
     """
     try:
         with get_db() as db:
@@ -153,6 +215,7 @@ def check_handover_received(handover_id):
                     }
             
             return False, None
+            
     except Exception as e:
         print(f"Error checking handover status: {e}")
         return False, None
@@ -162,7 +225,16 @@ def check_handover_received(handover_id):
 def save_receive_safe(data, handover_id):
     """
     Lưu receive với pessimistic locking để tránh double-receive
-    Returns: (success: bool, message: str)
+    
+    Sử dụng SELECT...FOR UPDATE để lock row trong transaction
+    Đảm bảo chỉ 1 user có thể nhận ca tại 1 thời điểm
+    
+    Args:
+        data: dict chứa thông tin nhận ca
+        handover_id: ID của bàn giao cần nhận
+        
+    Returns: 
+        (success: bool, message: str)
     """
     max_retries = 3
     
@@ -170,6 +242,7 @@ def save_receive_safe(data, handover_id):
         try:
             with get_db() as db:
                 # LOCK handover row để tránh concurrent receive
+                # with_for_update() tạo SELECT...FOR UPDATE query
                 handover = db.query(Handover).filter(
                     Handover.handover_id == handover_id
                 ).with_for_update().first()
@@ -177,7 +250,7 @@ def save_receive_safe(data, handover_id):
                 if not handover:
                     return False, "Không tìm thấy bàn giao"
                 
-                # Kiểm tra trạng thái (với lock)
+                # Kiểm tra trạng thái (với lock đã được acquire)
                 if handover.trang_thai_nhan == 'Đã nhận':
                     return False, "Bàn giao đã được nhận bởi người khác"
                 
@@ -191,18 +264,18 @@ def save_receive_safe(data, handover_id):
                     ngay_nhan_ca=datetime.strptime(data['ngay'], '%Y-%m-%d'),
                     thoi_gian_nhan_ca=datetime.now(),
                     handover_id=handover_id,
-                    xac_nhan_5s=data.get('5S - Xác Nhận'),
-                    comment_5s=data.get('5S - Comments Nhận'),
-                    xac_nhan_an_toan=data.get('An Toàn - Xác Nhận'),
-                    comment_an_toan=data.get('An Toàn - Comments Nhận'),
-                    xac_nhan_chat_luong=data.get('Chất Lượng - Xác Nhận'),
-                    comment_chat_luong=data.get('Chất Lượng - Comments Nhận'),
-                    xac_nhan_thiet_bi=data.get('Thiết Bị - Xác Nhận'),
-                    comment_thiet_bi=data.get('Thiết Bị - Comments Nhận'),
-                    xac_nhan_ke_hoach=data.get('Kế Hoạch - Xác Nhận'),
-                    comment_ke_hoach=data.get('Kế Hoạch - Comments Nhận'),
-                    xac_nhan_khac=data.get('Khác - Xác Nhận'),
-                    comment_khac=data.get('Khác - Comments Nhận')
+                    xac_nhan_5s=data.get('5S - Xác Nhận', ''),
+                    comment_5s=data.get('5S - Comments Nhận', ''),
+                    xac_nhan_an_toan=data.get('An Toàn - Xác Nhận', ''),
+                    comment_an_toan=data.get('An Toàn - Comments Nhận', ''),
+                    xac_nhan_chat_luong=data.get('Chất Lượng - Xác Nhận', ''),
+                    comment_chat_luong=data.get('Chất Lượng - Comments Nhận', ''),
+                    xac_nhan_thiet_bi=data.get('Thiết Bị - Xác Nhận', ''),
+                    comment_thiet_bi=data.get('Thiết Bị - Comments Nhận', ''),
+                    xac_nhan_ke_hoach=data.get('Kế Hoạch - Xác Nhận', ''),
+                    comment_ke_hoach=data.get('Kế Hoạch - Comments Nhận', ''),
+                    xac_nhan_khac=data.get('Khác - Xác Nhận', ''),
+                    comment_khac=data.get('Khác - Comments Nhận', '')
                 )
                 
                 # Update handover status
@@ -211,23 +284,34 @@ def save_receive_safe(data, handover_id):
                 db.add(receive)
                 db.flush()
                 
-                return True, "Success"
+                return True, "Nhận ca thành công"
                 
         except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            else:
-                return False, str(e)
+            error_msg = str(e)
+            
+            # Nếu là lock timeout hoặc deadlock, retry
+            if 'lock' in error_msg.lower() or 'deadlock' in error_msg.lower():
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+            
+            # Lỗi khác: return ngay
+            return False, f"Lỗi: {error_msg}"
     
-    return False, "Max retries exceeded"
+    return False, "Vượt quá số lần thử tối đa"
 
 # ===== DASHBOARD OPERATIONS =====
 
 def get_dashboard_data(filter_date, filter_line=None):
     """
-    Lấy dữ liệu dashboard với filter
-    Returns: list of dict
+    Lấy dữ liệu dashboard với filter theo ngày và line
+    
+    Args:
+        filter_date: datetime.date object
+        filter_line: str hoặc None (None = tất cả lines)
+        
+    Returns: 
+        list of dict, hoặc None nếu không có data
     """
     try:
         with get_db() as db:
@@ -281,6 +365,7 @@ def get_dashboard_data(filter_date, filter_line=None):
                 })
             
             return dashboard_data
+            
     except Exception as e:
         print(f"Error getting dashboard data: {e}")
         return None
@@ -288,7 +373,12 @@ def get_dashboard_data(filter_date, filter_line=None):
 # ===== USER OPERATIONS =====
 
 def check_login(username, password):
-    """Kiểm tra đăng nhập"""
+    """
+    Kiểm tra thông tin đăng nhập
+    
+    Returns: 
+        (success: bool, full_name: str/None)
+    """
     try:
         with get_db() as db:
             user = db.query(User).filter(
@@ -298,6 +388,7 @@ def check_login(username, password):
             if user:
                 return True, user.full_name
             return False, None
+            
     except Exception as e:
         print(f"Error checking login: {e}")
         return False, None
@@ -305,17 +396,27 @@ def check_login(username, password):
 # ===== LINE OPERATIONS =====
 
 def get_active_lines():
-    """Lấy danh sách lines đang active"""
+    """
+    Lấy danh sách lines đang active
+    
+    Returns: list of str (line names)
+    """
     try:
         with get_db() as db:
             lines = db.query(Line).filter(Line.is_active == True).all()
             return [line.line_name for line in lines]
+            
     except Exception as e:
         print(f"Error getting active lines: {e}")
+        # Fallback default lines
         return ['Line 1', 'Line 2', 'Line 3', 'Line 4', 'Line 5']
 
 def get_all_lines():
-    """Lấy tất cả lines để quản lý"""
+    """
+    Lấy tất cả lines để quản lý (admin only)
+    
+    Returns: list of dict
+    """
     try:
         with get_db() as db:
             lines = db.query(Line).all()
@@ -324,15 +425,19 @@ def get_all_lines():
                 'line_name': line.line_name,
                 'is_active': line.is_active
             } for line in lines]
+            
     except Exception as e:
         print(f"Error getting all lines: {e}")
         return []
 
 def save_lines_config(lines_data):
     """
-    Lưu cấu hình lines
+    Lưu cấu hình lines (admin only)
+    
     Args:
         lines_data: list of dict với keys: line_code, line_name, is_active
+        
+    Returns: bool
     """
     try:
         with get_db() as db:
@@ -348,7 +453,9 @@ def save_lines_config(lines_data):
                 )
                 db.add(line)
             
+            db.flush()
             return True
+            
     except Exception as e:
         print(f"Error saving lines config: {e}")
         return False
@@ -356,7 +463,11 @@ def save_lines_config(lines_data):
 # ===== DATA EXPORT OPERATIONS =====
 
 def get_handover_data_for_export():
-    """Lấy tất cả dữ liệu giao ca để export"""
+    """
+    Lấy tất cả dữ liệu giao ca để export
+    
+    Returns: list of dict
+    """
     try:
         with get_db() as db:
             handovers = db.query(Handover).order_by(
@@ -375,27 +486,32 @@ def get_handover_data_for_export():
                     'Ngày Báo Cáo': h.ngay_bao_cao,
                     'Thời Gian Giao Ca': h.thoi_gian_giao_ca,
                     'Trạng Thái Nhận': h.trang_thai_nhan,
-                    '5S - Tình Trạng': h.status_5s,
-                    '5S - Comments': h.comment_5s,
-                    'An Toàn - Tình Trạng': h.status_an_toan,
-                    'An Toàn - Comments': h.comment_an_toan,
-                    'Chất Lượng - Tình Trạng': h.status_chat_luong,
-                    'Chất Lượng - Comments': h.comment_chat_luong,
-                    'Thiết Bị - Tình Trạng': h.status_thiet_bi,
-                    'Thiết Bị - Comments': h.comment_thiet_bi,
-                    'Kế Hoạch - Tình Trạng': h.status_ke_hoach,
-                    'Kế Hoạch - Comments': h.comment_ke_hoach,
-                    'Khác - Tình Trạng': h.status_khac,
-                    'Khác - Comments': h.comment_khac
+                    '5S - Tình Trạng': h.status_5s or '',
+                    '5S - Comments': h.comment_5s or '',
+                    'An Toàn - Tình Trạng': h.status_an_toan or '',
+                    'An Toàn - Comments': h.comment_an_toan or '',
+                    'Chất Lượng - Tình Trạng': h.status_chat_luong or '',
+                    'Chất Lượng - Comments': h.comment_chat_luong or '',
+                    'Thiết Bị - Tình Trạng': h.status_thiet_bi or '',
+                    'Thiết Bị - Comments': h.comment_thiet_bi or '',
+                    'Kế Hoạch - Tình Trạng': h.status_ke_hoach or '',
+                    'Kế Hoạch - Comments': h.comment_ke_hoach or '',
+                    'Khác - Tình Trạng': h.status_khac or '',
+                    'Khác - Comments': h.comment_khac or ''
                 })
             
             return data
+            
     except Exception as e:
         print(f"Error getting handover data: {e}")
         return []
 
 def get_receive_data_for_export():
-    """Lấy tất cả dữ liệu nhận ca để export"""
+    """
+    Lấy tất cả dữ liệu nhận ca để export
+    
+    Returns: list of dict
+    """
     try:
         with get_db() as db:
             receives = db.query(Receive).order_by(
@@ -413,27 +529,35 @@ def get_receive_data_for_export():
                     'Ngày Nhận Ca': r.ngay_nhan_ca,
                     'Thời Gian Nhận Ca': r.thoi_gian_nhan_ca,
                     'ID Bàn Giao Tham Chiếu': r.handover_id,
-                    '5S - Xác Nhận': r.xac_nhan_5s,
-                    '5S - Comments Nhận': r.comment_5s,
-                    'An Toàn - Xác Nhận': r.xac_nhan_an_toan,
-                    'An Toàn - Comments Nhận': r.comment_an_toan,
-                    'Chất Lượng - Xác Nhận': r.xac_nhan_chat_luong,
-                    'Chất Lượng - Comments Nhận': r.comment_chat_luong,
-                    'Thiết Bị - Xác Nhận': r.xac_nhan_thiet_bi,
-                    'Thiết Bị - Comments Nhận': r.comment_thiet_bi,
-                    'Kế Hoạch - Xác Nhận': r.xac_nhan_ke_hoach,
-                    'Kế Hoạch - Comments Nhận': r.comment_ke_hoach,
-                    'Khác - Xác Nhận': r.xac_nhan_khac,
-                    'Khác - Comments Nhận': r.comment_khac
+                    '5S - Xác Nhận': r.xac_nhan_5s or '',
+                    '5S - Comments Nhận': r.comment_5s or '',
+                    'An Toàn - Xác Nhận': r.xac_nhan_an_toan or '',
+                    'An Toàn - Comments Nhận': r.comment_an_toan or '',
+                    'Chất Lượng - Xác Nhận': r.xac_nhan_chat_luong or '',
+                    'Chất Lượng - Comments Nhận': r.comment_chat_luong or '',
+                    'Thiết Bị - Xác Nhận': r.xac_nhan_thiet_bi or '',
+                    'Thiết Bị - Comments Nhận': r.comment_thiet_bi or '',
+                    'Kế Hoạch - Xác Nhận': r.xac_nhan_ke_hoach or '',
+                    'Kế Hoạch - Comments Nhận': r.comment_ke_hoach or '',
+                    'Khác - Xác Nhận': r.xac_nhan_khac or '',
+                    'Khác - Comments Nhận': r.comment_khac or ''
                 })
             
             return data
+            
     except Exception as e:
         print(f"Error getting receive data: {e}")
         return []
 
 def get_latest_handovers_for_display(limit=10):
-    """Lấy N bàn giao gần nhất để hiển thị"""
+    """
+    Lấy N bàn giao gần nhất để hiển thị
+    
+    Args:
+        limit: số lượng bản ghi tối đa
+        
+    Returns: list of dict
+    """
     try:
         with get_db() as db:
             handovers = db.query(Handover).order_by(
@@ -450,19 +574,20 @@ def get_latest_handovers_for_display(limit=10):
                 'Ngày Báo Cáo': h.ngay_bao_cao,
                 'Thời Gian Giao Ca': h.thoi_gian_giao_ca,
                 'Trạng Thái Nhận': h.trang_thai_nhan,
-                '5S - Tình Trạng': h.status_5s,
+                '5S - Tình Trạng': h.status_5s or '',
                 '5S - Comments': h.comment_5s or '',
-                'An Toàn - Tình Trạng': h.status_an_toan,
+                'An Toàn - Tình Trạng': h.status_an_toan or '',
                 'An Toàn - Comments': h.comment_an_toan or '',
-                'Chất Lượng - Tình Trạng': h.status_chat_luong,
+                'Chất Lượng - Tình Trạng': h.status_chat_luong or '',
                 'Chất Lượng - Comments': h.comment_chat_luong or '',
-                'Thiết Bị - Tình Trạng': h.status_thiet_bi,
+                'Thiết Bị - Tình Trạng': h.status_thiet_bi or '',
                 'Thiết Bị - Comments': h.comment_thiet_bi or '',
-                'Kế Hoạch - Tình Trạng': h.status_ke_hoach,
+                'Kế Hoạch - Tình Trạng': h.status_ke_hoach or '',
                 'Kế Hoạch - Comments': h.comment_ke_hoach or '',
-                'Khác - Tình Trạng': h.status_khac,
+                'Khác - Tình Trạng': h.status_khac or '',
                 'Khác - Comments': h.comment_khac or ''
             } for h in handovers]
+            
     except Exception as e:
         print(f"Error getting latest handovers: {e}")
         return []
@@ -471,14 +596,17 @@ def get_latest_handovers_for_display(limit=10):
 
 def get_combined_handover_receive_data(filter_date=None, filter_line=None):
     """
-    Lấy dữ liệu kết hợp giao ca và nhận ca
+    Lấy dữ liệu kết hợp giao ca và nhận ca với LEFT JOIN
+    
+    Args:
+        filter_date: datetime.date object hoặc None
+        filter_line: str hoặc None
+        
     Returns: list of dict với thông tin đầy đủ
     """
     try:
         with get_db() as db:
             # Query với left join để lấy cả handover chưa receive
-            from sqlalchemy.orm import aliased
-            
             query = db.query(Handover, Receive).outerjoin(
                 Receive, Handover.handover_id == Receive.handover_id
             )
@@ -531,6 +659,7 @@ def get_combined_handover_receive_data(filter_date=None, filter_line=None):
                 combined_data.append(data_row)
             
             return combined_data
+            
     except Exception as e:
         print(f"Error getting combined data: {e}")
         return []
@@ -540,7 +669,14 @@ def get_combined_handover_receive_data(filter_date=None, filter_line=None):
 def delete_handover_by_id(handover_id):
     """
     Xóa handover và receive liên quan (admin only)
-    Returns: (success: bool, message: str)
+    
+    CASCADE delete: xóa handover sẽ tự động xóa receive
+    
+    Args:
+        handover_id: ID của bàn giao cần xóa
+        
+    Returns: 
+        (success: bool, message: str)
     """
     try:
         with get_db() as db:
@@ -553,21 +689,30 @@ def delete_handover_by_id(handover_id):
                 return False, "Không tìm thấy bàn giao"
             
             # Xóa receive liên quan trước (nếu có)
-            db.query(Receive).filter(
+            deleted_receives = db.query(Receive).filter(
                 Receive.handover_id == handover_id
             ).delete()
             
             # Xóa handover
             db.delete(handover)
+            db.flush()
             
-            return True, f"Đã xóa bàn giao {handover_id}"
+            message = f"Đã xóa bàn giao {handover_id}"
+            if deleted_receives > 0:
+                message += f" và {deleted_receives} bản ghi nhận ca"
+            
+            return True, message
             
     except Exception as e:
         print(f"Error deleting handover: {e}")
-        return False, str(e)
+        return False, f"Lỗi: {str(e)}"
 
 def get_all_handovers_for_admin():
-    """Lấy tất cả handover cho admin quản lý"""
+    """
+    Lấy tất cả handover cho admin quản lý
+    
+    Returns: list of dict
+    """
     try:
         with get_db() as db:
             handovers = db.query(Handover).order_by(
@@ -585,6 +730,7 @@ def get_all_handovers_for_admin():
                 'Thời Gian Giao': h.thoi_gian_giao_ca,
                 'Trạng Thái Nhận': h.trang_thai_nhan,
             } for h in handovers]
+            
     except Exception as e:
         print(f"Error getting all handovers: {e}")
         return []
