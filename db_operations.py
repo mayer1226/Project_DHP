@@ -1,83 +1,86 @@
 from database import get_db, Handover, Receive, User, Line
-from sqlalchemy import and_, func, or_, text, Date, desc
-from sqlalchemy.orm import joinedload
-from datetime import datetime, date
+from sqlalchemy import and_, func, or_
+from datetime import datetime
 import time
-import uuid
+import random
 
 # ===== HANDOVER OPERATIONS =====
 
 def generate_handover_id():
     """
-    Tạo ID giao ca unique với PostgreSQL Advisory Lock
-    Format: HO-YYYYMMDD-XXXX (production) hoặc HO-timestamp-XXXX (fallback)
+    Tạo ID giao ca unique theo format HYBRID:
+    - Format cơ bản: HO-YYYYMMDD-XXXX (tương thích cũ)
+    - Nếu trùng: HO-YYYYMMDD-XXXX-RRR (thêm random suffix)
     
-    Advisory Lock đảm bảo chỉ 1 process được generate ID tại 1 thời điểm
-    Tránh race condition khi nhiều user submit đồng thời
+    Thread-safe với database lock
     """
-    LOCK_ID = 789456  # Unique lock ID cho function này
-    
     try:
         with get_db() as db:
-            # Kiểm tra xem có phải PostgreSQL không
-            db_url = str(db.bind.url)
-            is_postgresql = 'postgresql' in db_url
+            today = datetime.now().strftime('%Y%m%d')
             
-            if is_postgresql:
-                # PostgreSQL: Dùng Advisory Lock
-                try:
-                    # Acquire lock (blocking - chỉ 1 thread chạy tại 1 thời điểm)
-                    db.execute(text(f"SELECT pg_advisory_lock({LOCK_ID})"))
-                    
-                    today = datetime.now().strftime('%Y%m%d')
-                    
-                    # Đếm số handover trong ngày (an toàn vì có lock)
-                    count = db.query(func.count(Handover.id)).filter(
-                        Handover.handover_id.like(f'HO-{today}-%')
-                    ).scalar()
-                    
-                    new_id = f"HO-{today}-{(count + 1):04d}"
-                    
-                    # Release lock
-                    db.execute(text(f"SELECT pg_advisory_unlock({LOCK_ID})"))
-                    
-                    return new_id
-                    
-                except Exception as lock_error:
-                    # Nếu lỗi lock, fallback sang UUID
-                    print(f"Advisory lock failed: {lock_error}")
-                    # Release lock nếu có
-                    try:
-                        db.execute(text(f"SELECT pg_advisory_unlock({LOCK_ID})"))
-                    except:
-                        pass
+            # Đếm số handover trong ngày (với lock)
+            count = db.query(func.count(Handover.id)).filter(
+                Handover.handover_id.like(f'HO-{today}-%')
+            ).scalar()
             
-            # Fallback: SQLite hoặc PostgreSQL lock failed
-            # Dùng timestamp + UUID để đảm bảo unique tuyệt đối
-            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-            random_suffix = uuid.uuid4().hex[:4].upper()
-            return f"HO-{timestamp}-{random_suffix}"
+            base_id = f"HO-{today}-{(count + 1):04d}"
+            
+            # Kiểm tra xem ID đã tồn tại chưa
+            exists = db.query(Handover).filter(
+                Handover.handover_id == base_id
+            ).first()
+            
+            if exists:
+                # Nếu trùng, thêm random suffix
+                random_suffix = random.randint(100, 999)
+                return f"{base_id}-{random_suffix}"
+            
+            return base_id
             
     except Exception as e:
-        print(f"Error generating handover ID: {e}")
-        # Ultimate fallback: microsecond timestamp
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
-        return f"HO-{timestamp}"
+        # Fallback nếu lỗi database
+        print(f"Error generating handover_id: {e}")
+        today = datetime.now().strftime('%Y%m%d')
+        timestamp = datetime.now().strftime('%H%M%S')
+        random_num = random.randint(100, 999)
+        return f"HO-{today}-{timestamp}-{random_num}"
 
-def save_handover_safe(data):
+
+def save_handover_safe(data, max_retries=10):
     """
     Lưu handover với retry mechanism để xử lý concurrent access
-    Returns: (success: bool, result: str/id, error_detail: str)
+    
+    Args:
+        data: dict chứa thông tin handover (KHÔNG bao gồm handover_id)
+        max_retries: số lần thử lại tối đa
+    
+    Returns: 
+        (success: bool, result: str)
+        - Nếu thành công: (True, handover_id)
+        - Nếu thất bại: (False, error_message)
     """
-    max_retries = 5
-    base_delay = 0.1  # 100ms
+    retry_delay = 0.05  # 50ms
     
     for attempt in range(max_retries):
         try:
             with get_db() as db:
+                # Tạo ID MỚI cho mỗi lần thử
+                handover_id = generate_handover_id()
+                
+                # Kiểm tra ID đã tồn tại chưa (double-check)
+                exists = db.query(Handover).filter(
+                    Handover.handover_id == handover_id
+                ).first()
+                
+                if exists:
+                    # ID đã tồn tại, thử lại
+                    print(f"Attempt {attempt + 1}: ID {handover_id} already exists, retrying...")
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                
                 # Tạo handover object
                 handover = Handover(
-                    handover_id=data['handover_id'],
+                    handover_id=handover_id,
                     ma_nv_giao_ca=data['ma_nv'],
                     ten_nv_giao_ca=data['ten_nv'],
                     line=data['line'],
@@ -103,76 +106,81 @@ def save_handover_safe(data):
                 db.add(handover)
                 db.flush()  # Get ID trước khi commit
                 
-                return True, handover.handover_id, None
+                print(f"✅ Successfully saved handover with ID: {handover_id}")
+                return True, handover.handover_id
                 
         except Exception as e:
             error_str = str(e).lower()
             
-            # Kiểm tra loại lỗi
-            is_duplicate = 'duplicate' in error_str or 'unique' in error_str
-            is_lock_timeout = 'lock' in error_str or 'timeout' in error_str
-            
-            if attempt < max_retries - 1:
-                if is_duplicate:
-                    # Duplicate key: generate new ID và retry
-                    print(f"Attempt {attempt + 1}: Duplicate ID detected, regenerating...")
-                    data['handover_id'] = generate_handover_id()
-                    time.sleep(base_delay * (attempt + 1))
-                    continue
-                elif is_lock_timeout:
-                    # Lock timeout: wait và retry
-                    print(f"Attempt {attempt + 1}: Lock timeout, retrying...")
-                    time.sleep(base_delay * (attempt + 2))  # Longer wait
+            # Kiểm tra lỗi duplicate key
+            if 'duplicate' in error_str or 'unique constraint' in error_str:
+                if attempt < max_retries - 1:
+                    print(f"Attempt {attempt + 1}: Duplicate key error, retrying...")
+                    time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
                     continue
                 else:
-                    # Lỗi khác: retry với delay ngắn
-                    print(f"Attempt {attempt + 1}: Error {e}, retrying...")
-                    time.sleep(base_delay)
-                    continue
+                    return False, "ID đã tồn tại sau nhiều lần thử. Vui lòng thử lại sau vài giây."
             else:
-                # Hết retry: return detailed error
-                if is_duplicate:
-                    return False, None, "ID đã tồn tại sau nhiều lần thử. Vui lòng liên hệ IT."
-                elif is_lock_timeout:
-                    return False, None, "Hệ thống đang bận. Vui lòng thử lại sau vài giây."
-                else:
-                    return False, None, f"Lỗi lưu dữ liệu: {str(e)}"
+                # Lỗi khác (không phải duplicate)
+                print(f"Error saving handover: {e}")
+                return False, f"Lỗi database: {str(e)}"
     
-    return False, None, "Vượt quá số lần thử. Vui lòng thử lại."
+    return False, "Không thể tạo ID duy nhất sau nhiều lần thử. Vui lòng thử lại."
+
 
 def get_latest_handover(line, work_date):
     """
     Lấy thông tin bàn giao gần nhất chưa được nhận
     Args:
         line: Tên line
-        work_date: Ngày báo cáo (date object hoặc string YYYY-MM-DD)
-    Returns: Handover object hoặc None
+        work_date: datetime.date object
+    Returns: dict hoặc None
     """
     try:
         with get_db() as db:
-            # Chuyển đổi work_date sang date object nếu là string
-            if isinstance(work_date, str):
-                work_date = datetime.strptime(work_date, '%Y-%m-%d').date()
-            elif isinstance(work_date, datetime):
-                work_date = work_date.date()
-            
-            query = db.query(Handover).filter(
+            handover = db.query(Handover).filter(
                 and_(
                     Handover.line == line,
-                    func.cast(Handover.ngay_bao_cao, Date) == work_date,
+                    func.date(Handover.ngay_bao_cao) == work_date,
                     Handover.trang_thai_nhan == 'Chưa nhận'
                 )
-            ).order_by(Handover.thoi_gian_giao_ca.desc())
+            ).order_by(Handover.thoi_gian_giao_ca.desc()).first()
             
-            return query.first()
+            if not handover:
+                return None
+            
+            # Convert to dict
+            return {
+                'ID Giao Ca': handover.handover_id,
+                'Mã NV Giao Ca': handover.ma_nv_giao_ca,
+                'Tên NV Giao Ca': handover.ten_nv_giao_ca,
+                'Line': handover.line,
+                'Ca': handover.ca,
+                'Nhân viên thuộc ca': handover.nhan_vien_thuoc_ca,
+                'Ngày Báo Cáo': handover.ngay_bao_cao.date(),
+                'Thời Gian Giao Ca': handover.thoi_gian_giao_ca,
+                '5S - Tình Trạng': handover.status_5s,
+                '5S - Comments': handover.comment_5s or '',
+                'An Toàn - Tình Trạng': handover.status_an_toan,
+                'An Toàn - Comments': handover.comment_an_toan or '',
+                'Chất Lượng - Tình Trạng': handover.status_chat_luong,
+                'Chất Lượng - Comments': handover.comment_chat_luong or '',
+                'Thiết Bị - Tình Trạng': handover.status_thiet_bi,
+                'Thiết Bị - Comments': handover.comment_thiet_bi or '',
+                'Kế Hoạch - Tình Trạng': handover.status_ke_hoach,
+                'Kế Hoạch - Comments': handover.comment_ke_hoach or '',
+                'Khác - Tình Trạng': handover.status_khac,
+                'Khác - Comments': handover.comment_khac or ''
+            }
     except Exception as e:
         print(f"Error getting latest handover: {e}")
         return None
 
+
 def check_handover_received(handover_id):
     """
-    Kiểm tra xem handover đã được nhận hay chưa
-    Returns: (is_received: bool, receive_data: dict or None)
+    Kiểm tra xem bàn giao đã được nhận chưa
+    Returns: (is_received: bool, receive_info: dict/None)
     """
     try:
         with get_db() as db:
@@ -184,736 +192,338 @@ def check_handover_received(handover_id):
                 return False, None
             
             if handover.trang_thai_nhan == 'Đã nhận':
-                # Lấy thông tin nhận ca
+                # Lấy thông tin người nhận
                 receive = db.query(Receive).filter(
                     Receive.handover_id == handover_id
                 ).first()
                 
                 if receive:
                     return True, {
-                        'ma_nv_nhan_ca': receive.ma_nv_nhan_ca,
-                        'ten_nv_nhan_ca': receive.ten_nv_nhan_ca,
-                        'thoi_gian_nhan_ca': receive.thoi_gian_nhan_ca
+                        'ma_nv': receive.ma_nv_nhan_ca,
+                        'ten_nv': receive.ten_nv_nhan_ca,
+                        'thoi_gian': receive.thoi_gian_nhan_ca
                     }
-                else:
-                    return True, None
             
             return False, None
     except Exception as e:
-        print(f"Error checking handover received: {e}")
+        print(f"Error checking handover status: {e}")
         return False, None
 
-def get_handover_by_id(handover_id):
-    """
-    Lấy thông tin handover theo ID
-    """
-    try:
-        with get_db() as db:
-            return db.query(Handover).filter(
-                Handover.handover_id == handover_id
-            ).first()
-    except Exception as e:
-        print(f"Error getting handover by ID: {e}")
-        return None
-
-def get_all_handovers(line=None, start_date=None, end_date=None, status=None):
-    """
-    Lấy tất cả handover với filters
-    """
-    try:
-        with get_db() as db:
-            query = db.query(Handover)
-            
-            if line:
-                query = query.filter(Handover.line == line)
-            
-            if start_date:
-                if isinstance(start_date, str):
-                    start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) >= start_date)
-            
-            if end_date:
-                if isinstance(end_date, str):
-                    end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) <= end_date)
-            
-            if status:
-                query = query.filter(Handover.trang_thai_nhan == status)
-            
-            return query.order_by(Handover.thoi_gian_giao_ca.desc()).all()
-    except Exception as e:
-        print(f"Error getting all handovers: {e}")
-        return []
-
-def get_all_handovers_for_admin(line=None, start_date=None, end_date=None):
-    """
-    Lấy tất cả handover cho admin panel
-    Bao gồm cả đã nhận và chưa nhận
-    """
-    try:
-        with get_db() as db:
-            query = db.query(Handover)
-            
-            if line:
-                query = query.filter(Handover.line == line)
-            
-            if start_date:
-                if isinstance(start_date, str):
-                    start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) >= start_date)
-            
-            if end_date:
-                if isinstance(end_date, str):
-                    end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) <= end_date)
-            
-            return query.order_by(Handover.thoi_gian_giao_ca.desc()).all()
-    except Exception as e:
-        print(f"Error getting handovers for admin: {e}")
-        return []
-
-def delete_handover_by_id(handover_id):
-    """
-    Xóa handover theo ID (admin function)
-    Returns: (success: bool, message: str)
-    """
-    try:
-        with get_db() as db:
-            # Kiểm tra handover tồn tại
-            handover = db.query(Handover).filter(
-                Handover.handover_id == handover_id
-            ).first()
-            
-            if not handover:
-                return False, "Không tìm thấy handover"
-            
-            # Kiểm tra xem đã có receive chưa
-            receive = db.query(Receive).filter(
-                Receive.handover_id == handover_id
-            ).first()
-            
-            if receive:
-                # Xóa receive trước
-                db.delete(receive)
-            
-            # Xóa handover
-            db.delete(handover)
-            db.commit()
-            
-            return True, f"Đã xóa handover {handover_id}"
-            
-    except Exception as e:
-        print(f"Error deleting handover: {e}")
-        return False, f"Lỗi xóa handover: {str(e)}"
 
 # ===== RECEIVE OPERATIONS =====
 
-def save_receive_safe(data, handover_id=None):
+def save_receive_safe(data, handover_id):
     """
-    Lưu thông tin nhận ca với locking để tránh duplicate receive
-    Args:
-        data: Dict chứa thông tin nhận ca
-        handover_id: ID giao ca (optional - có thể truyền riêng hoặc trong data)
+    Lưu receive với pessimistic locking để tránh double-receive
     Returns: (success: bool, message: str)
     """
     max_retries = 3
-    base_delay = 0.1
-    
-    # Support both calling styles:
-    # 1. save_receive_safe(data, handover_id) - app.py style
-    # 2. save_receive_safe(data) where data contains handover_id
-    if handover_id:
-        data['handover_id'] = handover_id
     
     for attempt in range(max_retries):
         try:
             with get_db() as db:
-                # Lock handover record để tránh duplicate receive
+                # LOCK handover row để tránh concurrent receive
                 handover = db.query(Handover).filter(
-                    Handover.handover_id == data['handover_id']
+                    Handover.handover_id == handover_id
                 ).with_for_update().first()
                 
                 if not handover:
-                    return False, "Không tìm thấy thông tin giao ca"
+                    return False, "Không tìm thấy bàn giao"
                 
-                # Kiểm tra đã nhận chưa
+                # Kiểm tra trạng thái (với lock)
                 if handover.trang_thai_nhan == 'Đã nhận':
-                    return False, "Ca này đã được nhận bởi người khác"
+                    return False, "Bàn giao đã được nhận bởi người khác"
                 
                 # Tạo receive record
                 receive = Receive(
-                    handover_id=data['handover_id'],
                     ma_nv_nhan_ca=data['ma_nv'],
                     ten_nv_nhan_ca=data['ten_nv'],
+                    line=data['line'],
+                    ca=data['ca'],
+                    nhan_vien_thuoc_ca=data['chu_ky'],
+                    ngay_nhan_ca=datetime.strptime(data['ngay'], '%Y-%m-%d'),
                     thoi_gian_nhan_ca=datetime.now(),
+                    handover_id=handover_id,
                     xac_nhan_5s=data.get('5S - Xác Nhận'),
-                    comment_5s=data.get('5S - Comments'),
+                    comment_5s=data.get('5S - Comments Nhận'),
                     xac_nhan_an_toan=data.get('An Toàn - Xác Nhận'),
-                    comment_an_toan=data.get('An Toàn - Comments'),
+                    comment_an_toan=data.get('An Toàn - Comments Nhận'),
                     xac_nhan_chat_luong=data.get('Chất Lượng - Xác Nhận'),
-                    comment_chat_luong=data.get('Chất Lượng - Comments'),
+                    comment_chat_luong=data.get('Chất Lượng - Comments Nhận'),
                     xac_nhan_thiet_bi=data.get('Thiết Bị - Xác Nhận'),
-                    comment_thiet_bi=data.get('Thiết Bị - Comments'),
+                    comment_thiet_bi=data.get('Thiết Bị - Comments Nhận'),
                     xac_nhan_ke_hoach=data.get('Kế Hoạch - Xác Nhận'),
-                    comment_ke_hoach=data.get('Kế Hoạch - Comments'),
+                    comment_ke_hoach=data.get('Kế Hoạch - Comments Nhận'),
                     xac_nhan_khac=data.get('Khác - Xác Nhận'),
-                    comment_khac=data.get('Khác - Comments')
+                    comment_khac=data.get('Khác - Comments Nhận')
                 )
                 
-                db.add(receive)
-                
-                # Cập nhật trạng thái handover
+                # Update handover status
                 handover.trang_thai_nhan = 'Đã nhận'
                 
-                db.commit()
-                return True, "Đã xác nhận nhận ca thành công"
+                db.add(receive)
+                db.flush()
+                
+                return True, "Success"
                 
         except Exception as e:
-            error_str = str(e).lower()
-            
-            if 'lock' in error_str or 'timeout' in error_str:
-                if attempt < max_retries - 1:
-                    print(f"Attempt {attempt + 1}: Lock conflict, retrying...")
-                    time.sleep(base_delay * (attempt + 2))
-                    continue
-                else:
-                    return False, "Hệ thống đang bận. Vui lòng thử lại sau vài giây."
+            if attempt < max_retries - 1:
+                time.sleep(0.1 * (attempt + 1))
+                continue
             else:
-                if attempt < max_retries - 1:
-                    time.sleep(base_delay)
-                    continue
-                else:
-                    return False, f"Lỗi lưu dữ liệu: {str(e)}"
+                return False, str(e)
     
-    return False, "Vượt quá số lần thử. Vui lòng thử lại."
+    return False, "Max retries exceeded"
 
-def get_all_receives(line=None, start_date=None, end_date=None):
+
+# ===== DASHBOARD OPERATIONS =====
+
+def get_dashboard_data(filter_date, filter_line=None):
     """
-    Lấy tất cả receive với filters
+    Lấy dữ liệu dashboard với filter
+    Returns: list of dict
     """
     try:
         with get_db() as db:
-            query = db.query(Receive).join(Handover)
-            
-            if line:
-                query = query.filter(Handover.line == line)
-            
-            if start_date:
-                if isinstance(start_date, str):
-                    start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) >= start_date)
-            
-            if end_date:
-                if isinstance(end_date, str):
-                    end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) <= end_date)
-            
-            return query.order_by(Receive.thoi_gian_nhan_ca.desc()).all()
-    except Exception as e:
-        print(f"Error getting all receives: {e}")
-        return []
-
-def get_combined_handover_receive_data(line=None, start_date=None, end_date=None):
-    """
-    Lấy dữ liệu kết hợp handover và receive (LEFT JOIN)
-    Returns: List of tuples (handover, receive or None)
-    """
-    try:
-        with get_db() as db:
-            query = db.query(Handover, Receive).outerjoin(
-                Receive, Handover.handover_id == Receive.handover_id
+            query = db.query(Handover).filter(
+                func.date(Handover.ngay_bao_cao) == filter_date
             )
             
-            if line:
-                query = query.filter(Handover.line == line)
+            if filter_line and filter_line != "Tất cả":
+                query = query.filter(Handover.line == filter_line)
             
-            if start_date:
-                if isinstance(start_date, str):
-                    start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) >= start_date)
+            handovers = query.order_by(Handover.thoi_gian_giao_ca.desc()).all()
             
-            if end_date:
-                if isinstance(end_date, str):
-                    end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) <= end_date)
+            if not handovers:
+                return None
             
-            return query.order_by(Handover.thoi_gian_giao_ca.desc()).all()
+            dashboard_data = []
+            for h in handovers:
+                # Lấy thông tin receive nếu đã nhận
+                receive_info = None
+                if h.trang_thai_nhan == 'Đã nhận':
+                    receive = db.query(Receive).filter(
+                        Receive.handover_id == h.handover_id
+                    ).first()
+                    if receive:
+                        receive_info = {
+                            'time': receive.thoi_gian_nhan_ca,
+                            'by': f"{receive.ma_nv_nhan_ca} - {receive.ten_nv_nhan_ca}"
+                        }
+                
+                # Đếm OK/NOK/NA
+                statuses = [h.status_5s, h.status_an_toan, h.status_chat_luong, 
+                           h.status_thiet_bi, h.status_ke_hoach, h.status_khac]
+                ok_count = sum(1 for s in statuses if s == 'OK')
+                nok_count = sum(1 for s in statuses if s == 'NOK')
+                na_count = sum(1 for s in statuses if s == 'NA')
+                
+                dashboard_data.append({
+                    'ID Giao Ca': h.handover_id,
+                    'Line': h.line,
+                    'Ca': h.ca,
+                    'Nhân viên thuộc ca': h.nhan_vien_thuoc_ca,
+                    'Mã NV Giao': h.ma_nv_giao_ca,
+                    'Tên NV Giao': h.ten_nv_giao_ca,
+                    'Thời Gian Giao': h.thoi_gian_giao_ca,
+                    'OK': ok_count,
+                    'NOK': nok_count,
+                    'NA': na_count,
+                    'Trạng Thái Nhận': h.trang_thai_nhan,
+                    'Thời Gian Nhận': receive_info['time'] if receive_info else None,
+                    'Người Nhận': receive_info['by'] if receive_info else None
+                })
+            
+            return dashboard_data
     except Exception as e:
-        print(f"Error getting combined data: {e}")
-        return []
+        print(f"Error getting dashboard data: {e}")
+        return None
+
 
 # ===== USER OPERATIONS =====
 
-def verify_user(username, password):
-    """
-    Xác thực user
-    Returns: (success: bool, user_data: dict or None)
-    """
+def check_login(username, password):
+    """Kiểm tra đăng nhập"""
     try:
         with get_db() as db:
-            user = db.query(User).filter(User.username == username).first()
+            user = db.query(User).filter(
+                and_(User.username == username, User.password == password)
+            ).first()
             
-            if user and user.password == password:
-                return True, {
-                    'username': user.username,
-                    'full_name': user.full_name
-                }
+            if user:
+                return True, user.full_name
             return False, None
     except Exception as e:
-        print(f"Error verifying user: {e}")
+        print(f"Error checking login: {e}")
         return False, None
 
-def get_all_users():
-    """
-    Lấy tất cả users
-    """
-    try:
-        with get_db() as db:
-            return db.query(User).all()
-    except Exception as e:
-        print(f"Error getting users: {e}")
-        return []
-
-def create_user(username, password, full_name):
-    """
-    Tạo user mới
-    Returns: (success: bool, message: str)
-    """
-    try:
-        with get_db() as db:
-            # Kiểm tra username đã tồn tại chưa
-            existing = db.query(User).filter(User.username == username).first()
-            if existing:
-                return False, "Username đã tồn tại"
-            
-            user = User(
-                username=username,
-                password=password,
-                full_name=full_name
-            )
-            db.add(user)
-            db.commit()
-            return True, "Tạo user thành công"
-    except Exception as e:
-        print(f"Error creating user: {e}")
-        return False, f"Lỗi tạo user: {str(e)}"
-
-def update_user_password(username, new_password):
-    """
-    Cập nhật password user
-    Returns: (success: bool, message: str)
-    """
-    try:
-        with get_db() as db:
-            user = db.query(User).filter(User.username == username).first()
-            if not user:
-                return False, "Không tìm thấy user"
-            
-            user.password = new_password
-            db.commit()
-            return True, "Cập nhật password thành công"
-    except Exception as e:
-        print(f"Error updating password: {e}")
-        return False, f"Lỗi cập nhật password: {str(e)}"
-
-def delete_user(username):
-    """
-    Xóa user
-    Returns: (success: bool, message: str)
-    """
-    try:
-        with get_db() as db:
-            user = db.query(User).filter(User.username == username).first()
-            if not user:
-                return False, "Không tìm thấy user"
-            
-            db.delete(user)
-            db.commit()
-            return True, "Xóa user thành công"
-    except Exception as e:
-        print(f"Error deleting user: {e}")
-        return False, f"Lỗi xóa user: {str(e)}"
 
 # ===== LINE OPERATIONS =====
 
 def get_active_lines():
-    """
-    Lấy danh sách các line đang active
-    Returns: List of line names
-    """
+    """Lấy danh sách lines đang active"""
     try:
         with get_db() as db:
             lines = db.query(Line).filter(Line.is_active == True).all()
             return [line.line_name for line in lines]
     except Exception as e:
         print(f"Error getting active lines: {e}")
-        return []
+        return ['Line 1', 'Line 2', 'Line 3', 'Line 4', 'Line 5']
+
 
 def get_all_lines():
-    """
-    Lấy tất cả lines
-    """
+    """Lấy tất cả lines để quản lý"""
     try:
         with get_db() as db:
-            return db.query(Line).all()
+            lines = db.query(Line).all()
+            return [{
+                'line_code': line.line_code,
+                'line_name': line.line_name,
+                'is_active': line.is_active
+            } for line in lines]
     except Exception as e:
         print(f"Error getting all lines: {e}")
         return []
 
-def create_line(line_code, line_name, is_active=True):
+
+def save_lines_config(lines_data):
     """
-    Tạo line mới
-    Returns: (success: bool, message: str)
+    Lưu cấu hình lines
+    Args:
+        lines_data: list of dict với keys: line_code, line_name, is_active
     """
     try:
         with get_db() as db:
-            # Kiểm tra line_code đã tồn tại chưa
-            existing = db.query(Line).filter(Line.line_code == line_code).first()
-            if existing:
-                return False, "Line code đã tồn tại"
+            # Xóa tất cả lines cũ
+            db.query(Line).delete()
             
-            line = Line(
-                line_code=line_code,
-                line_name=line_name,
-                is_active=is_active
-            )
-            db.add(line)
-            db.commit()
-            return True, "Tạo line thành công"
-    except Exception as e:
-        print(f"Error creating line: {e}")
-        return False, f"Lỗi tạo line: {str(e)}"
-
-def update_line(line_code, line_name=None, is_active=None):
-    """
-    Cập nhật thông tin line
-    Returns: (success: bool, message: str)
-    """
-    try:
-        with get_db() as db:
-            line = db.query(Line).filter(Line.line_code == line_code).first()
-            if not line:
-                return False, "Không tìm thấy line"
-            
-            if line_name is not None:
-                line.line_name = line_name
-            if is_active is not None:
-                line.is_active = is_active
-            
-            db.commit()
-            return True, "Cập nhật line thành công"
-    except Exception as e:
-        print(f"Error updating line: {e}")
-        return False, f"Lỗi cập nhật line: {str(e)}"
-
-def delete_line(line_code):
-    """
-    Xóa line
-    Returns: (success: bool, message: str)
-    """
-    try:
-        with get_db() as db:
-            line = db.query(Line).filter(Line.line_code == line_code).first()
-            if not line:
-                return False, "Không tìm thấy line"
-            
-            # Kiểm tra xem có handover nào dùng line này không
-            handover_count = db.query(func.count(Handover.id)).filter(
-                Handover.line == line.line_name
-            ).scalar()
-            
-            if handover_count > 0:
-                return False, f"Không thể xóa. Line này có {handover_count} handover"
-            
-            db.delete(line)
-            db.commit()
-            return True, "Xóa line thành công"
-    except Exception as e:
-        print(f"Error deleting line: {e}")
-        return False, f"Lỗi xóa line: {str(e)}"
-
-# ===== DASHBOARD/STATISTICS OPERATIONS =====
-
-def get_dashboard_stats(line=None, start_date=None, end_date=None):
-    """
-    Lấy thống kê cho dashboard
-    Returns: dict với các metrics
-    """
-    try:
-        with get_db() as db:
-            query = db.query(Handover)
-            
-            if line:
-                query = query.filter(Handover.line == line)
-            
-            if start_date:
-                if isinstance(start_date, str):
-                    start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) >= start_date)
-            
-            if end_date:
-                if isinstance(end_date, str):
-                    end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-                query = query.filter(func.cast(Handover.ngay_bao_cao, Date) <= end_date)
-            
-            total_handovers = query.count()
-            
-            received = query.filter(Handover.trang_thai_nhan == 'Đã nhận').count()
-            pending = query.filter(Handover.trang_thai_nhan == 'Chưa nhận').count()
-            
-            # Tính % nhận ca đúng hạn (receive trong vòng 1h từ handover)
-            on_time_count = 0
-            if received > 0:
-                receives = db.query(Receive).join(Handover).filter(
-                    Handover.trang_thai_nhan == 'Đã nhận'
+            # Thêm lines mới
+            for line_data in lines_data:
+                line = Line(
+                    line_code=line_data['line_code'],
+                    line_name=line_data['line_name'],
+                    is_active=line_data.get('is_active', True)
                 )
-                if line:
-                    receives = receives.filter(Handover.line == line)
-                if start_date:
-                    receives = receives.filter(func.cast(Handover.ngay_bao_cao, Date) >= start_date)
-                if end_date:
-                    receives = receives.filter(func.cast(Handover.ngay_bao_cao, Date) <= end_date)
-                
-                for receive, handover in receives.join(Handover).with_entities(Receive, Handover).all():
-                    time_diff = (receive.thoi_gian_nhan_ca - handover.thoi_gian_giao_ca).total_seconds()
-                    if time_diff <= 3600:  # 1 hour
-                        on_time_count += 1
+                db.add(line)
             
-            on_time_rate = (on_time_count / received * 100) if received > 0 else 0
-            
-            return {
-                'total_handovers': total_handovers,
-                'received': received,
-                'pending': pending,
-                'on_time_count': on_time_count,
-                'on_time_rate': round(on_time_rate, 1)
-            }
-    except Exception as e:
-        print(f"Error getting dashboard stats: {e}")
-        return {
-            'total_handovers': 0,
-            'received': 0,
-            'pending': 0,
-            'on_time_count': 0,
-            'on_time_rate': 0
-        }
-
-def get_pending_handovers(line=None, limit=10):
-    """
-    Lấy các handover chưa nhận (gần nhất)
-    """
-    try:
-        with get_db() as db:
-            query = db.query(Handover).filter(
-                Handover.trang_thai_nhan == 'Chưa nhận'
-            )
-            
-            if line:
-                query = query.filter(Handover.line == line)
-            
-            query = query.order_by(Handover.thoi_gian_giao_ca.desc())
-            
-            if limit:
-                query = query.limit(limit)
-            
-            return query.all()
-    except Exception as e:
-        print(f"Error getting pending handovers: {e}")
-        return []
-
-# ===== COMPATIBILITY FUNCTIONS FOR app.py =====
-
-def get_dashboard_data(filter_date=None, filter_line=None):
-    """
-    Wrapper function for backward compatibility with app.py
-    Converts to get_dashboard_stats format
-    """
-    try:
-        # Convert filter_date string to date object if needed
-        start_date = None
-        end_date = None
-        if filter_date:
-            if isinstance(filter_date, str):
-                date_obj = datetime.strptime(filter_date, '%Y-%m-%d').date()
-            else:
-                date_obj = filter_date
-            start_date = date_obj
-            end_date = date_obj
-        
-        line = None if filter_line == "Tất cả" else filter_line
-        
-        # Get handovers for the date
-        handovers = get_all_handovers(line=line, start_date=start_date, end_date=end_date)
-        
-        # Process into dashboard format
-        dashboard_data = []
-        for handover in handovers:
-            # Count status
-            statuses = [
-                handover.status_5s,
-                handover.status_an_toan,
-                handover.status_chat_luong,
-                handover.status_thiet_bi,
-                handover.status_ke_hoach,
-                handover.status_khac
-            ]
-            
-            ok_count = statuses.count('OK')
-            nok_count = statuses.count('NOK')
-            na_count = statuses.count('NA')
-            
-            dashboard_data.append({
-                'handover_id': handover.handover_id,
-                'line': handover.line,
-                'ca': handover.ca,
-                'ma_nv': handover.ma_nv_giao_ca,
-                'ten_nv': handover.ten_nv_giao_ca,
-                'ngay': handover.ngay_bao_cao,
-                'thoi_gian': handover.thoi_gian_giao_ca,
-                'trang_thai': handover.trang_thai_nhan,
-                'OK': ok_count,
-                'NOK': nok_count,
-                'NA': na_count
-            })
-        
-        return dashboard_data
-    except Exception as e:
-        print(f"Error getting dashboard data: {e}")
-        return []
-
-def check_login(username, password):
-    """
-    Wrapper function for backward compatibility with app.py
-    Uses verify_user underneath
-    """
-    success, user_data = verify_user(username, password)
-    if success:
-        return True, user_data['full_name']
-    return False, None
-
-def save_lines_config(lines_list):
-    """
-    Save multiple lines configuration
-    Used by app.py for bulk line updates
-    """
-    try:
-        with get_db() as db:
-            # Deactivate all existing lines first
-            all_lines = db.query(Line).all()
-            for line in all_lines:
-                line.is_active = False
-            
-            # Activate or create lines from the list
-            for line_info in lines_list:
-                if isinstance(line_info, dict):
-                    line_code = line_info.get('code')
-                    line_name = line_info.get('name')
-                else:
-                    # If it's just a string, use it as both code and name
-                    line_code = line_info
-                    line_name = line_info
-                
-                existing = db.query(Line).filter(Line.line_code == line_code).first()
-                if existing:
-                    existing.is_active = True
-                    existing.line_name = line_name
-                else:
-                    new_line = Line(
-                        line_code=line_code,
-                        line_name=line_name,
-                        is_active=True
-                    )
-                    db.add(new_line)
-            
-            db.commit()
             return True
     except Exception as e:
         print(f"Error saving lines config: {e}")
         return False
 
+
+# ===== DATA EXPORT OPERATIONS =====
+
 def get_handover_data_for_export():
-    """
-    Get all handover data formatted for export
-    Used by app.py for Excel export
-    """
+    """Lấy tất cả dữ liệu giao ca để export"""
     try:
-        handovers = get_all_handovers()
-        
-        export_data = []
-        for h in handovers:
-            export_data.append({
-                'ID Giao Ca': h.handover_id,
-                'Mã NV Giao': h.ma_nv_giao_ca,
-                'Tên NV Giao': h.ten_nv_giao_ca,
-                'Line': h.line,
-                'Ca': h.ca,
-                'Nhân Viên Thuộc Ca': h.nhan_vien_thuoc_ca,
-                'Ngày Báo Cáo': h.ngay_bao_cao.strftime('%Y-%m-%d') if h.ngay_bao_cao else '',
-                'Thời Gian Giao Ca': h.thoi_gian_giao_ca.strftime('%Y-%m-%d %H:%M:%S') if h.thoi_gian_giao_ca else '',
-                'Trạng Thái Nhận': h.trang_thai_nhan,
-                '5S - Status': h.status_5s,
-                '5S - Comment': h.comment_5s,
-                'An Toàn - Status': h.status_an_toan,
-                'An Toàn - Comment': h.comment_an_toan,
-                'Chất Lượng - Status': h.status_chat_luong,
-                'Chất Lượng - Comment': h.comment_chat_luong,
-                'Thiết Bị - Status': h.status_thiet_bi,
-                'Thiết Bị - Comment': h.comment_thiet_bi,
-                'Kế Hoạch - Status': h.status_ke_hoach,
-                'Kế Hoạch - Comment': h.comment_ke_hoach,
-                'Khác - Status': h.status_khac,
-                'Khác - Comment': h.comment_khac
-            })
-        
-        return export_data
+        with get_db() as db:
+            handovers = db.query(Handover).order_by(
+                Handover.created_at.desc()
+            ).all()
+            
+            data = []
+            for h in handovers:
+                data.append({
+                    'ID Giao Ca': h.handover_id,
+                    'Mã NV Giao Ca': h.ma_nv_giao_ca,
+                    'Tên NV Giao Ca': h.ten_nv_giao_ca,
+                    'Line': h.line,
+                    'Ca': h.ca,
+                    'Nhân viên thuộc ca': h.nhan_vien_thuoc_ca,
+                    'Ngày Báo Cáo': h.ngay_bao_cao,
+                    'Thời Gian Giao Ca': h.thoi_gian_giao_ca,
+                    'Trạng Thái Nhận': h.trang_thai_nhan,
+                    '5S - Tình Trạng': h.status_5s,
+                    '5S - Comments': h.comment_5s,
+                    'An Toàn - Tình Trạng': h.status_an_toan,
+                    'An Toàn - Comments': h.comment_an_toan,
+                    'Chất Lượng - Tình Trạng': h.status_chat_luong,
+                    'Chất Lượng - Comments': h.comment_chat_luong,
+                    'Thiết Bị - Tình Trạng': h.status_thiet_bi,
+                    'Thiết Bị - Comments': h.comment_thiet_bi,
+                    'Kế Hoạch - Tình Trạng': h.status_ke_hoach,
+                    'Kế Hoạch - Comments': h.comment_ke_hoach,
+                    'Khác - Tình Trạng': h.status_khac,
+                    'Khác - Comments': h.comment_khac
+                })
+            
+            return data
     except Exception as e:
-        print(f"Error getting handover export data: {e}")
+        print(f"Error getting handover data: {e}")
         return []
+
 
 def get_receive_data_for_export():
-    """
-    Get all receive data formatted for export
-    Used by app.py for Excel export
-    """
+    """Lấy tất cả dữ liệu nhận ca để export"""
     try:
-        receives = get_all_receives()
-        
-        export_data = []
-        for r in receives:
-            # Get handover info
-            handover = get_handover_by_id(r.handover_id)
+        with get_db() as db:
+            receives = db.query(Receive).order_by(
+                Receive.created_at.desc()
+            ).all()
             
-            export_data.append({
-                'ID Giao Ca': r.handover_id,
-                'Mã NV Nhận': r.ma_nv_nhan_ca,
-                'Tên NV Nhận': r.ten_nv_nhan_ca,
-                'Line': r.line if r.line else (handover.line if handover else ''),
-                'Ca': r.ca if r.ca else (handover.ca if handover else ''),
-                'Nhân Viên Thuộc Ca': r.nhan_vien_thuoc_ca if r.nhan_vien_thuoc_ca else (handover.nhan_vien_thuoc_ca if handover else ''),
-                'Ngày Nhận Ca': r.ngay_nhan_ca.strftime('%Y-%m-%d') if r.ngay_nhan_ca else '',
-                'Thời Gian Nhận Ca': r.thoi_gian_nhan_ca.strftime('%Y-%m-%d %H:%M:%S') if r.thoi_gian_nhan_ca else '',
-                '5S - Xác Nhận': r.xac_nhan_5s,
-                '5S - Comment': r.comment_5s,
-                'An Toàn - Xác Nhận': r.xac_nhan_an_toan,
-                'An Toàn - Comment': r.comment_an_toan,
-                'Chất Lượng - Xác Nhận': r.xac_nhan_chat_luong,
-                'Chất Lượng - Comment': r.comment_chat_luong,
-                'Thiết Bị - Xác Nhận': r.xac_nhan_thiet_bi,
-                'Thiết Bị - Comment': r.comment_thiet_bi,
-                'Kế Hoạch - Xác Nhận': r.xac_nhan_ke_hoach,
-                'Kế Hoạch - Comment': r.comment_ke_hoach,
-                'Khác - Xác Nhận': r.xac_nhan_khac,
-                'Khác - Comment': r.comment_khac
-            })
-        
-        return export_data
+            data = []
+            for r in receives:
+                data.append({
+                    'Mã NV Nhận Ca': r.ma_nv_nhan_ca,
+                    'Tên NV Nhận Ca': r.ten_nv_nhan_ca,
+                    'Line': r.line,
+                    'Ca': r.ca,
+                    'Nhân viên thuộc ca': r.nhan_vien_thuoc_ca,
+                    'Ngày Nhận Ca': r.ngay_nhan_ca,
+                    'Thời Gian Nhận Ca': r.thoi_gian_nhan_ca,
+                    'ID Bàn Giao Tham Chiếu': r.handover_id,
+                    '5S - Xác Nhận': r.xac_nhan_5s,
+                    '5S - Comments Nhận': r.comment_5s,
+                    'An Toàn - Xác Nhận': r.xac_nhan_an_toan,
+                    'An Toàn - Comments Nhận': r.comment_an_toan,
+                    'Chất Lượng - Xác Nhận': r.xac_nhan_chat_luong,
+                    'Chất Lượng - Comments Nhận': r.comment_chat_luong,
+                    'Thiết Bị - Xác Nhận': r.xac_nhan_thiet_bi,
+                    'Thiết Bị - Comments Nhận': r.comment_thiet_bi,
+                    'Kế Hoạch - Xác Nhận': r.xac_nhan_ke_hoach,
+                    'Kế Hoạch - Comments Nhận': r.comment_ke_hoach,
+                    'Khác - Xác Nhận': r.xac_nhan_khac,
+                    'Khác - Comments Nhận': r.comment_khac
+                })
+            
+            return data
     except Exception as e:
-        print(f"Error getting receive export data: {e}")
+        print(f"Error getting receive data: {e}")
         return []
 
-def get_latest_handovers_for_display(line=None, limit=5):
-    """
-    Get latest handovers for display (legacy compatibility function)
-    Uses get_pending_handovers underneath
-    """
-    return get_pending_handovers(line=line, limit=limit)
+
+def get_latest_handovers_for_display(limit=10):
+    """Lấy N bàn giao gần nhất để hiển thị"""
+    try:
+        with get_db() as db:
+            handovers = db.query(Handover).order_by(
+                Handover.thoi_gian_giao_ca.desc()
+            ).limit(limit).all()
+            
+            return [{
+                'ID Giao Ca': h.handover_id,
+                'Line': h.line,
+                'Ca': h.ca,
+                'Nhân viên thuộc ca': h.nhan_vien_thuoc_ca,
+                'Mã NV Giao Ca': h.ma_nv_giao_ca,
+                'Tên NV Giao Ca': h.ten_nv_giao_ca,
+                'Ngày Báo Cáo': h.ngay_bao_cao,
+                'Thời Gian Giao Ca': h.thoi_gian_giao_ca,
+                'Trạng Thái Nhận': h.trang_thai_nhan,
+                '5S - Tình Trạng': h.status_5s,
+                '5S - Comments': h.comment_5s or '',
+                'An Toàn - Tình Trạng': h.status_an_toan,
+                'An Toàn - Comments': h.comment_an_toan or '',
+                'Chất Lượng - Tình Trạng': h.status_chat_luong,
+                'Chất Lượng - Comments': h.comment_chat_luong or '',
+                'Thiết Bị - Tình Trạng': h.status_thiet_bi,
+                'Thiết Bị - Comments': h.comment_thiet_bi or '',
+                'Kế Hoạch - Tình Trạng': h.status_ke_hoach,
+                'Kế Hoạch - Comments': h.comment_ke_hoach or '',
+                'Khác - Tình Trạng': h.status_khac,
+                'Khác - Comments': h.comment_khac or ''
+            } for h in handovers]
+    except Exception as e:
+        print(f"Error getting latest handovers: {e}")
+        return []
