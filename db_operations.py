@@ -308,13 +308,22 @@ def delete_handover_by_id(handover_id):
 
 # ===== RECEIVE OPERATIONS =====
 
-def save_receive_safe(data):
+def save_receive_safe(data, handover_id=None):
     """
     Lưu thông tin nhận ca với locking để tránh duplicate receive
+    Args:
+        data: Dict chứa thông tin nhận ca
+        handover_id: ID giao ca (optional - có thể truyền riêng hoặc trong data)
     Returns: (success: bool, message: str)
     """
     max_retries = 3
     base_delay = 0.1
+    
+    # Support both calling styles:
+    # 1. save_receive_safe(data, handover_id) - app.py style
+    # 2. save_receive_safe(data) where data contains handover_id
+    if handover_id:
+        data['handover_id'] = handover_id
     
     for attempt in range(max_retries):
         try:
@@ -710,4 +719,194 @@ def get_pending_handovers(line=None, limit=10):
             return query.all()
     except Exception as e:
         print(f"Error getting pending handovers: {e}")
+        return []
+
+# ===== COMPATIBILITY FUNCTIONS FOR app.py =====
+
+def get_dashboard_data(filter_date=None, filter_line=None):
+    """
+    Wrapper function for backward compatibility with app.py
+    Converts to get_dashboard_stats format
+    """
+    try:
+        # Convert filter_date string to date object if needed
+        start_date = None
+        end_date = None
+        if filter_date:
+            if isinstance(filter_date, str):
+                date_obj = datetime.strptime(filter_date, '%Y-%m-%d').date()
+            else:
+                date_obj = filter_date
+            start_date = date_obj
+            end_date = date_obj
+        
+        line = None if filter_line == "Tất cả" else filter_line
+        
+        # Get handovers for the date
+        handovers = get_all_handovers(line=line, start_date=start_date, end_date=end_date)
+        
+        # Process into dashboard format
+        dashboard_data = []
+        for handover in handovers:
+            # Count status
+            statuses = [
+                handover.status_5s,
+                handover.status_an_toan,
+                handover.status_chat_luong,
+                handover.status_thiet_bi,
+                handover.status_ke_hoach,
+                handover.status_khac
+            ]
+            
+            ok_count = statuses.count('OK')
+            nok_count = statuses.count('NOK')
+            na_count = statuses.count('NA')
+            
+            dashboard_data.append({
+                'handover_id': handover.handover_id,
+                'line': handover.line,
+                'ca': handover.ca,
+                'ma_nv': handover.ma_nv_giao_ca,
+                'ten_nv': handover.ten_nv_giao_ca,
+                'ngay': handover.ngay_bao_cao,
+                'thoi_gian': handover.thoi_gian_giao_ca,
+                'trang_thai': handover.trang_thai_nhan,
+                'OK': ok_count,
+                'NOK': nok_count,
+                'NA': na_count
+            })
+        
+        return dashboard_data
+    except Exception as e:
+        print(f"Error getting dashboard data: {e}")
+        return []
+
+def check_login(username, password):
+    """
+    Wrapper function for backward compatibility with app.py
+    Uses verify_user underneath
+    """
+    success, user_data = verify_user(username, password)
+    if success:
+        return True, user_data['full_name']
+    return False, None
+
+def save_lines_config(lines_list):
+    """
+    Save multiple lines configuration
+    Used by app.py for bulk line updates
+    """
+    try:
+        with get_db() as db:
+            # Deactivate all existing lines first
+            all_lines = db.query(Line).all()
+            for line in all_lines:
+                line.is_active = False
+            
+            # Activate or create lines from the list
+            for line_info in lines_list:
+                if isinstance(line_info, dict):
+                    line_code = line_info.get('code')
+                    line_name = line_info.get('name')
+                else:
+                    # If it's just a string, use it as both code and name
+                    line_code = line_info
+                    line_name = line_info
+                
+                existing = db.query(Line).filter(Line.line_code == line_code).first()
+                if existing:
+                    existing.is_active = True
+                    existing.line_name = line_name
+                else:
+                    new_line = Line(
+                        line_code=line_code,
+                        line_name=line_name,
+                        is_active=True
+                    )
+                    db.add(new_line)
+            
+            db.commit()
+            return True
+    except Exception as e:
+        print(f"Error saving lines config: {e}")
+        return False
+
+def get_handover_data_for_export():
+    """
+    Get all handover data formatted for export
+    Used by app.py for Excel export
+    """
+    try:
+        handovers = get_all_handovers()
+        
+        export_data = []
+        for h in handovers:
+            export_data.append({
+                'ID Giao Ca': h.handover_id,
+                'Mã NV Giao': h.ma_nv_giao_ca,
+                'Tên NV Giao': h.ten_nv_giao_ca,
+                'Line': h.line,
+                'Ca': h.ca,
+                'Nhân Viên Thuộc Ca': h.nhan_vien_thuoc_ca,
+                'Ngày Báo Cáo': h.ngay_bao_cao.strftime('%Y-%m-%d') if h.ngay_bao_cao else '',
+                'Thời Gian Giao Ca': h.thoi_gian_giao_ca.strftime('%Y-%m-%d %H:%M:%S') if h.thoi_gian_giao_ca else '',
+                'Trạng Thái Nhận': h.trang_thai_nhan,
+                '5S - Status': h.status_5s,
+                '5S - Comment': h.comment_5s,
+                'An Toàn - Status': h.status_an_toan,
+                'An Toàn - Comment': h.comment_an_toan,
+                'Chất Lượng - Status': h.status_chat_luong,
+                'Chất Lượng - Comment': h.comment_chat_luong,
+                'Thiết Bị - Status': h.status_thiet_bi,
+                'Thiết Bị - Comment': h.comment_thiet_bi,
+                'Kế Hoạch - Status': h.status_ke_hoach,
+                'Kế Hoạch - Comment': h.comment_ke_hoach,
+                'Khác - Status': h.status_khac,
+                'Khác - Comment': h.comment_khac
+            })
+        
+        return export_data
+    except Exception as e:
+        print(f"Error getting handover export data: {e}")
+        return []
+
+def get_receive_data_for_export():
+    """
+    Get all receive data formatted for export
+    Used by app.py for Excel export
+    """
+    try:
+        receives = get_all_receives()
+        
+        export_data = []
+        for r in receives:
+            # Get handover info
+            handover = get_handover_by_id(r.handover_id)
+            
+            export_data.append({
+                'ID Giao Ca': r.handover_id,
+                'Mã NV Nhận': r.ma_nv_nhan_ca,
+                'Tên NV Nhận': r.ten_nv_nhan_ca,
+                'Line': r.line if r.line else (handover.line if handover else ''),
+                'Ca': r.ca if r.ca else (handover.ca if handover else ''),
+                'Nhân Viên Thuộc Ca': r.nhan_vien_thuoc_ca if r.nhan_vien_thuoc_ca else (handover.nhan_vien_thuoc_ca if handover else ''),
+                'Ngày Nhận Ca': r.ngay_nhan_ca.strftime('%Y-%m-%d') if r.ngay_nhan_ca else '',
+                'Thời Gian Nhận Ca': r.thoi_gian_nhan_ca.strftime('%Y-%m-%d %H:%M:%S') if r.thoi_gian_nhan_ca else '',
+                '5S - Xác Nhận': r.xac_nhan_5s,
+                '5S - Comment': r.comment_5s,
+                'An Toàn - Xác Nhận': r.xac_nhan_an_toan,
+                'An Toàn - Comment': r.comment_an_toan,
+                'Chất Lượng - Xác Nhận': r.xac_nhan_chat_luong,
+                'Chất Lượng - Comment': r.comment_chat_luong,
+                'Thiết Bị - Xác Nhận': r.xac_nhan_thiet_bi,
+                'Thiết Bị - Comment': r.comment_thiet_bi,
+                'Kế Hoạch - Xác Nhận': r.xac_nhan_ke_hoach,
+                'Kế Hoạch - Comment': r.comment_ke_hoach,
+                'Khác - Xác Nhận': r.xac_nhan_khac,
+                'Khác - Comment': r.comment_khac
+            })
+        
+        return export_data
+    except Exception as e:
+        print(f"Error getting receive export data: {e}")
         return []
