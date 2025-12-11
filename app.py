@@ -17,7 +17,6 @@ from db_operations import (
     save_lines_config,
     get_handover_data_for_export,
     get_receive_data_for_export,
-    get_latest_handovers_for_display,
     get_combined_handover_receive_data,
     delete_handover_by_id,
     get_all_handovers_for_admin
