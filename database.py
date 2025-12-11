@@ -12,19 +12,49 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql+psycopg2://', 1)
 
-# Fallback cho local development
+# Fallback cho local development (SQLite)
 if not DATABASE_URL:
-    DATABASE_URL = 'postgresql://localhost:5432/shift_handover'
+    DATABASE_URL = 'sqlite:///./shift_handover.db'
+    print("Using SQLite for local development")
 
-# Tạo engine với connection pooling
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=10,           # Số connection pool
-    max_overflow=20,        # Số connection tối đa khi pool đầy
-    pool_pre_ping=True,     # Kiểm tra connection trước khi dùng
-    pool_recycle=3600,      # Recycle connection sau 1 giờ
-    echo=False              # Set True để debug SQL queries
-)
+# Kiểm tra loại database
+is_postgresql = 'postgresql' in DATABASE_URL
+is_sqlite = 'sqlite' in DATABASE_URL
+
+# Tạo engine với connection pooling tùy theo database type
+if is_postgresql:
+    # PostgreSQL: Production settings cho Render
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=10,           # Số connection cơ bản trong pool
+        max_overflow=20,        # Số connection bổ sung tối đa khi pool đầy
+        pool_pre_ping=True,     # Kiểm tra connection trước khi dùng (detect stale connections)
+        pool_recycle=3600,      # Recycle connection sau 1 giờ (tránh timeout)
+        echo=False,             # Set True để debug SQL queries
+        connect_args={
+            'connect_timeout': 10,
+            'options': '-c timezone=utc'
+        }
+    )
+    print("Connected to PostgreSQL (Production)")
+elif is_sqlite:
+    # SQLite: Local development settings
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=5,            # SQLite không cần pool lớn
+        max_overflow=10,
+        pool_pre_ping=True,
+        echo=False,
+        connect_args={
+            'check_same_thread': False,  # Cho phép multi-thread với SQLite
+            'timeout': 30                # Timeout cho lock contention
+        }
+    )
+    print("Connected to SQLite (Local Development)")
+else:
+    # Fallback generic
+    engine = create_engine(DATABASE_URL, echo=False)
+    print(f"Connected to database: {DATABASE_URL[:20]}...")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -35,6 +65,10 @@ def get_db():
     """
     Context manager để quản lý database session
     Tự động commit khi thành công, rollback khi lỗi
+    
+    Usage:
+        with get_db() as db:
+            user = db.query(User).first()
     """
     db = SessionLocal()
     try:
@@ -137,6 +171,7 @@ def init_db():
     try:
         # Tạo tất cả tables
         Base.metadata.create_all(bind=engine)
+        print("Database tables created successfully")
         
         # Tạo dữ liệu mặc định
         with get_db() as db:
@@ -149,21 +184,23 @@ def init_db():
                     full_name='Administrator'
                 )
                 db.add(admin)
+                print("Created default admin user")
             
-            # Kiểm tra và tạo default lines
+            # Kiểm tra và tạo default lines (LEGO lines)
             if db.query(Line).count() == 0:
                 default_lines = [
-                    Line(line_code='LINE-01', line_name='Line 1', is_active=True),
-                    Line(line_code='LINE-02', line_name='Line 2', is_active=True),
-                    Line(line_code='LINE-03', line_name='Line 3', is_active=True),
-                    Line(line_code='LINE-04', line_name='Line 4', is_active=True),
-                    Line(line_code='LINE-05', line_name='Line 5', is_active=True),
+                    Line(line_code='20A', line_name='Line 20A', is_active=True),
+                    Line(line_code='20B', line_name='Line 20B', is_active=True),
+                    Line(line_code='30A', line_name='Line 30A', is_active=True),
+                    Line(line_code='30B', line_name='Line 30B', is_active=True),
+                    Line(line_code='40A', line_name='Line 40A', is_active=True),
                 ]
                 db.add_all(default_lines)
+                print("Created default lines: 20A, 20B, 30A, 30B, 40A")
+            
+            db.commit()
         
         return True
     except Exception as e:
         print(f"Error initializing database: {e}")
         return False
-
-
