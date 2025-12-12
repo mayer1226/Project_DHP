@@ -17,7 +17,14 @@ from db_operations import (
     get_handover_data_for_export,
     get_receive_data_for_export,
     get_latest_handovers_for_display,
-    get_combined_handover_receive_data  # Hàm mới để lấy dữ liệu tổng hợp
+    get_combined_handover_receive_data,
+    # Hàm mới cho edit/delete
+    get_handover_by_id,
+    update_handover,
+    delete_handover,
+    get_receive_by_handover_id,
+    delete_receive,
+    search_handovers
 )
 
 # Cấu hình trang
@@ -158,6 +165,17 @@ select:has(option[value="NA"]:checked) {
 .dataframe tbody tr:hover {
     background-color: #f5f5f5;
 }
+
+/* Admin badge */
+.admin-badge {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 5px 15px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: bold;
+    display: inline-block;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -202,19 +220,41 @@ def main():
         return
     
     st.title("🔄 Hệ Thống Bàn Giao Ca Làm Việc Trên Line")
+    
+    # Hiển thị badge admin nếu đã đăng nhập
+    if 'admin_logged_in' in st.session_state and st.session_state.admin_logged_in:
+        st.markdown(f"""
+        <div style="text-align: right; margin-bottom: 10px;">
+            <span class="admin-badge">👑 ADMIN: {st.session_state.admin_name}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
     st.markdown("---")
     
-    # Tabs cho các chức năng - THÊM TAB XEM DỮ LIỆU
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Dashboard", 
-        "📤 Giao Ca", 
-        "📥 Nhận Ca", 
-        "📈 Xem Dữ Liệu",  # TAB MỚI
-        "⚙️ Cài Đặt"
-    ])
+    # Tabs cho các chức năng - THÊM TAB QUẢN LÝ
+    tabs = ["📊 Dashboard", "📤 Giao Ca", "📥 Nhận Ca", "📈 Xem Dữ Liệu", "⚙️ Cài Đặt"]
+    
+    # Thêm tab Quản Lý nếu là admin
+    if 'admin_logged_in' in st.session_state and st.session_state.admin_logged_in:
+        tabs.insert(4, "🔧 Quản Lý")
+    
+    selected_tabs = st.tabs(tabs)
+    
+    # Mapping tabs
+    tab_dashboard = selected_tabs[0]
+    tab_handover = selected_tabs[1]
+    tab_receive = selected_tabs[2]
+    tab_view_data = selected_tabs[3]
+    
+    if len(selected_tabs) == 6:  # Có tab Quản Lý
+        tab_manage = selected_tabs[4]
+        tab_settings = selected_tabs[5]
+    else:
+        tab_manage = None
+        tab_settings = selected_tabs[4]
     
     # TAB 0: DASHBOARD
-    with tab1:
+    with tab_dashboard:
         st.header("📊 Dashboard - Tổng Quan Bàn Giao Ca")
         
         # Thêm bộ lọc ngày
@@ -411,7 +451,7 @@ def main():
                             st.rerun()
     
     # TAB 1: GIAO CA
-    with tab2:
+    with tab_handover:
         st.header("📤 Thực Hiện Giao Ca")
         
         # Khởi tạo session state cho handover nếu chưa có
@@ -749,7 +789,7 @@ def main():
 
     
     # TAB 2: NHẬN CA
-    with tab3:
+    with tab_receive:
         st.header("📥 Nhận Ca Làm Việc")
         
         # Khởi tạo session state cho receive nếu chưa có
@@ -825,10 +865,10 @@ def main():
                                            index=0,
                                            help="Chọn ca làm việc của nhân viên")
                 
-                ngay_nhan = st.date_input("Ngày bàn giao được tạo *", 
+                ngay_nhan = st.date_input("Ngày Làm Việc *", 
                                           value=datetime.now(),
                                           key="ngay_nhan",
-                                          help="Chọn ngày bàn giao được tạo để lọc tìm nhanh và chính xác")
+                                          help="Chọn ngày làm việc")
             
             # Kiểm tra thay đổi Line hoặc Ngày
             if 'prev_line_nhan' not in st.session_state:
@@ -1136,8 +1176,8 @@ Vui lòng làm mới trang và thử lại.
 3. Kiểm tra kết nối internet
                                     """)
     
-    # TAB 3: XEM DỮ LIỆU - TAB MỚI
-    with tab4:
+    # TAB 3: XEM DỮ LIỆU
+    with tab_view_data:
         st.header("📈 Xem Dữ Liệu Bàn Giao Ca")
         
         # Sub-tabs cho các loại dữ liệu
@@ -1148,7 +1188,7 @@ Vui lòng làm mới trang và thử lại.
             "🔥 Giao Ca Mới Nhất"
         ])
         
-        # SUB-TAB 1: TỔNG HỢP GIAO-NHẬN (MỚI)
+        # SUB-TAB 1: TỔNG HỢP GIAO-NHẬN
         with data_tab1:
             st.subheader("📊 Bảng Tổng Hợp Giao-Nhận Ca")
             st.caption("Bảng này hiển thị đầy đủ thông tin giao ca và nhận ca để dễ tra cứu")
@@ -1364,16 +1404,381 @@ Vui lòng làm mới trang và thử lại.
             except Exception as e:
                 st.error(f"Lỗi khi đọc dữ liệu: {e}")
     
-    # TAB 4: CÀI ĐẶT
-    with tab5:
+    # TAB 4: QUẢN LÝ (CHỈ HIỂN THỊ KHI LÀ ADMIN)
+    if tab_manage is not None:
+        with tab_manage:
+            # Phần này sẽ được tiếp tục trong phần 2 do giới hạn độ dài
+            pass
+    
+    # TAB 5: CÀI ĐẶT
+    with tab_settings:
+        # Phần này sẽ được tiếp tục trong phần 2
+        pass
+
+if __name__ == "__main__":
+    main()
+
+    # TAB 4: QUẢN LÝ (CHỈ HIỂN THỊ KHI LÀ ADMIN)
+    if tab_manage is not None:
+        with tab_manage:
+            st.header("🔧 Quản Lý Bàn Giao Ca")
+            st.caption("⚠️ **Chức năng này chỉ dành cho Admin** - Cho phép tìm kiếm, sửa và xóa bàn giao ca")
+            
+            st.markdown("---")
+            
+            # Phần tìm kiếm
+            st.subheader("🔍 Tìm Kiếm Bàn Giao Ca")
+            
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            
+            with col_s1:
+                search_term = st.text_input(
+                    "Tìm kiếm",
+                    placeholder="ID, Mã NV, Tên NV...",
+                    key="manage_search_term"
+                )
+            
+            with col_s2:
+                search_from_date = st.date_input(
+                    "Từ ngày",
+                    value=datetime.now().date() - pd.Timedelta(days=7),
+                    key="manage_from_date"
+                )
+            
+            with col_s3:
+                search_to_date = st.date_input(
+                    "Đến ngày",
+                    value=datetime.now().date(),
+                    key="manage_to_date"
+                )
+            
+            with col_s4:
+                search_line = st.selectbox(
+                    "Line",
+                    ["Tất cả"] + get_active_lines(),
+                    key="manage_search_line"
+                )
+            
+            col_s5, col_s6 = st.columns(2)
+            
+            with col_s5:
+                search_status = st.selectbox(
+                    "Trạng thái",
+                    ["Tất cả", "Đã nhận", "Chưa nhận"],
+                    key="manage_search_status"
+                )
+            
+            with col_s6:
+                st.markdown("<br>", unsafe_allow_html=True)
+                search_button = st.button("🔍 Tìm Kiếm", type="primary", use_container_width=True, key="do_search")
+            
+            st.markdown("---")
+            
+            # Thực hiện tìm kiếm
+            if search_button or 'search_results' in st.session_state:
+                if search_button:
+                    with st.spinner("⏳ Đang tìm kiếm..."):
+                        results = search_handovers(
+                            search_term=search_term if search_term else None,
+                            from_date=search_from_date.strftime('%Y-%m-%d'),
+                            to_date=search_to_date.strftime('%Y-%m-%d'),
+                            line=search_line,
+                            status=search_status,
+                            limit=100
+                        )
+                        st.session_state.search_results = results
+                
+                results = st.session_state.get('search_results', [])
+                
+                if results:
+                    st.success(f"✅ Tìm thấy **{len(results)}** kết quả")
+                    
+                    # Hiển thị kết quả dưới dạng bảng
+                    df_results = pd.DataFrame(results)
+                    
+                    # Thêm cột Actions
+                    st.markdown("### 📋 Kết Quả Tìm Kiếm")
+                    
+                    for idx, row in df_results.iterrows():
+                        # Xác định màu dựa trên trạng thái
+                        if row['Trạng Thái'] == 'Đã nhận':
+                            status_color = "🟢"
+                        else:
+                            status_color = "🟡"
+                        
+                        if row['NOK'] > 0:
+                            priority_icon = "🔴"
+                        else:
+                            priority_icon = ""
+                        
+                        with st.expander(f"{priority_icon} {status_color} **{row['ID Giao Ca']}** - {row['Line']} - {row['Ca']} - {row['Mã NV']} - {row['Tên NV']}", expanded=False):
+                            
+                            # Thông tin tóm tắt
+                            col_info1, col_info2, col_info3, col_info4 = st.columns(4)
+                            
+                            with col_info1:
+                                st.metric("Ngày", row['Ngày'].strftime('%d/%m/%Y') if isinstance(row['Ngày'], (date, datetime)) else row['Ngày'])
+                            
+                            with col_info2:
+                                st.metric("Nhóm", row['Nhóm'])
+                            
+                            with col_info3:
+                                st.write("**Trạng thái hạng mục:**")
+                                st.write(f"🟢 OK: {row['OK']} | 🔴 NOK: {row['NOK']} | ⚪ NA: {row['NA']}")
+                            
+                            with col_info4:
+                                st.metric("Trạng thái nhận", row['Trạng Thái'])
+                            
+                            st.markdown("---")
+                            
+                            # Nút hành động
+                            col_act1, col_act2, col_act3 = st.columns(3)
+                            
+                            with col_act1:
+                                if st.button("📝 Sửa", key=f"edit_{row['ID Giao Ca']}", use_container_width=True):
+                                    st.session_state.editing_handover_id = row['ID Giao Ca']
+                                    st.rerun()
+                            
+                            with col_act2:
+                                if row['Trạng Thái'] == 'Đã nhận':
+                                    if st.button("🗑️ Xóa Phiếu Nhận", key=f"del_receive_{row['ID Giao Ca']}", use_container_width=True, type="secondary"):
+                                        st.session_state.deleting_receive_id = row['ID Giao Ca']
+                                        st.rerun()
+                                else:
+                                    st.button("🗑️ Xóa Phiếu Nhận", key=f"del_receive_{row['ID Giao Ca']}", use_container_width=True, disabled=True)
+                            
+                            with col_act3:
+                                if st.button("❌ Xóa Bàn Giao", key=f"del_{row['ID Giao Ca']}", use_container_width=True, type="secondary"):
+                                    st.session_state.deleting_handover_id = row['ID Giao Ca']
+                                    st.rerun()
+                    
+                else:
+                    st.info("Không tìm thấy kết quả nào")
+            
+            st.markdown("---")
+            
+            # XỬ LÝ EDIT HANDOVER
+            if 'editing_handover_id' in st.session_state:
+                handover_id = st.session_state.editing_handover_id
+                
+                st.markdown("---")
+                st.subheader(f"📝 Chỉnh Sửa Bàn Giao: {handover_id}")
+                
+                # Lấy thông tin handover
+                handover_info = get_handover_by_id(handover_id)
+                
+                if handover_info:
+                    # Kiểm tra trạng thái
+                    if handover_info['trang_thai'] == 'Đã nhận':
+                        st.error("⚠️ **Cảnh báo:** Bàn giao này đã được nhận. Vui lòng xóa phiếu nhận ca trước khi chỉnh sửa.")
+                        
+                        col_cancel = st.columns([1, 2, 1])[1]
+                        with col_cancel:
+                            if st.button("❌ Hủy Chỉnh Sửa", use_container_width=True):
+                                del st.session_state.editing_handover_id
+                                st.rerun()
+                    else:
+                        # Form chỉnh sửa
+                        with st.form(key="edit_handover_form"):
+                            st.markdown("### 👤 Thông Tin Nhân Viên")
+                            
+                            col_e1, col_e2, col_e3 = st.columns(3)
+                            
+                            with col_e1:
+                                edit_ma_nv = st.text_input("Mã Nhân Viên *", value=handover_info['ma_nv'], max_chars=6)
+                                edit_line = st.selectbox("Line *", get_active_lines(), index=get_active_lines().index(handover_info['line']) if handover_info['line'] in get_active_lines() else 0)
+                            
+                            with col_e2:
+                                edit_ten_nv = st.text_input("Tên Nhân Viên *", value=handover_info['ten_nv'])
+                                edit_ca = st.selectbox("Ca *", ["Ca Sáng (7h-19h)", "Ca Tối (19h-7h)"], index=0 if handover_info['ca'] == "Ca Sáng (7h-19h)" else 1)
+                            
+                            with col_e3:
+                                edit_chu_ky = st.selectbox("Nhóm *", ["A", "B", "C", "D"], index=["A", "B", "C", "D"].index(handover_info['chu_ky']) if handover_info['chu_ky'] in ["A", "B", "C", "D"] else 0)
+                                edit_ngay = st.date_input("Ngày *", value=handover_info['ngay'] if isinstance(handover_info['ngay'], date) else datetime.strptime(str(handover_info['ngay']), '%Y-%m-%d').date())
+                            
+                            st.markdown("---")
+                            st.markdown("### 📋 Các Hạng Mục")
+                            
+                            edit_data = {}
+                            
+                            for idx, category in enumerate(CATEGORIES):
+                                if idx % 2 == 0:
+                                    col1, col2 = st.columns(2)
+                                
+                                with col1 if idx % 2 == 0 else col2:
+                                    st.markdown(f"**{category}**")
+                                    
+                                    current_status = handover_info.get(f"{category} - Tình Trạng", "OK")
+                                    status_index = STATUS_OPTIONS.index(current_status) if current_status in STATUS_OPTIONS else 0
+                                    
+                                    status = st.selectbox(
+                                        "Tình trạng",
+                                        options=STATUS_OPTIONS,
+                                        index=status_index,
+                                        key=f"edit_status_{category}",
+                                        label_visibility="collapsed"
+                                    )
+                                    edit_data[f"{category} - Tình Trạng"] = status
+                                    
+                                    current_comment = handover_info.get(f"{category} - Comments", "")
+                                    comment = st.text_area(
+                                        "Ghi chú",
+                                        value=current_comment,
+                                        key=f"edit_comment_{category}",
+                                        height=100,
+                                        label_visibility="collapsed"
+                                    )
+                                    edit_data[f"{category} - Comments"] = comment
+                            
+                            st.markdown("---")
+                            
+                            # Nút submit
+                            col_submit1, col_submit2, col_submit3 = st.columns([1, 1, 1])
+                            
+                            with col_submit1:
+                                submit_edit = st.form_submit_button("💾 Lưu Thay Đổi", type="primary", use_container_width=True)
+                            
+                            with col_submit2:
+                                cancel_edit = st.form_submit_button("❌ Hủy", use_container_width=True)
+                            
+                            if submit_edit:
+                                # Validate
+                                is_valid, error_msg = validate_employee_id(edit_ma_nv)
+                                
+                                if not is_valid:
+                                    st.error(f"⚠️ {error_msg}")
+                                else:
+                                    # Chuẩn bị dữ liệu update
+                                    update_data = {
+                                        'ma_nv': edit_ma_nv,
+                                        'ten_nv': edit_ten_nv,
+                                        'line': edit_line,
+                                        'ca': edit_ca,
+                                        'chu_ky': edit_chu_ky,
+                                        'ngay': edit_ngay.strftime('%Y-%m-%d'),
+                                        **edit_data
+                                    }
+                                    
+                                    with st.spinner("⏳ Đang lưu thay đổi..."):
+                                        success, message = update_handover(handover_id, update_data)
+                                    
+                                    if success:
+                                        st.success(f"✅ {message}")
+                                        time.sleep(1)
+                                        del st.session_state.editing_handover_id
+                                        if 'search_results' in st.session_state:
+                                            del st.session_state.search_results
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ {message}")
+                            
+                            if cancel_edit:
+                                del st.session_state.editing_handover_id
+                                st.rerun()
+                else:
+                    st.error("❌ Không tìm thấy thông tin bàn giao")
+                    del st.session_state.editing_handover_id
+            
+            # XỬ LÝ XÓA PHIẾU NHẬN
+            if 'deleting_receive_id' in st.session_state:
+                handover_id = st.session_state.deleting_receive_id
+                
+                st.markdown("---")
+                st.warning(f"⚠️ **Xác nhận xóa phiếu nhận ca cho bàn giao: {handover_id}**")
+                
+                receive_info = get_receive_by_handover_id(handover_id)
+                
+                if receive_info:
+                    st.info(f"""
+**Thông tin phiếu nhận:**
+- Người nhận: {receive_info['ma_nv']} - {receive_info['ten_nv']}
+- Thời gian nhận: {receive_info['thoi_gian']}
+
+⚠️ **Lưu ý:** Sau khi xóa, trạng thái bàn giao sẽ chuyển về "Chưa nhận"
+                    """)
+                    
+                    col_del1, col_del2, col_del3 = st.columns([1, 1, 1])
+                    
+                    with col_del1:
+                        if st.button("✅ Xác Nhận Xóa", type="primary", use_container_width=True, key="confirm_del_receive"):
+                            with st.spinner("⏳ Đang xóa..."):
+                                success, message = delete_receive(handover_id)
+                            
+                            if success:
+                                st.success(f"✅ {message}")
+                                time.sleep(1)
+                                del st.session_state.deleting_receive_id
+                                if 'search_results' in st.session_state:
+                                    del st.session_state.search_results
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {message}")
+                    
+                    with col_del2:
+                        if st.button("❌ Hủy", use_container_width=True, key="cancel_del_receive"):
+                            del st.session_state.deleting_receive_id
+                            st.rerun()
+                else:
+                    st.error("❌ Không tìm thấy phiếu nhận ca")
+                    del st.session_state.deleting_receive_id
+            
+            # XỬ LÝ XÓA BÀN GIAO
+            if 'deleting_handover_id' in st.session_state:
+                handover_id = st.session_state.deleting_handover_id
+                
+                st.markdown("---")
+                st.error(f"🚨 **Xác nhận xóa bàn giao: {handover_id}**")
+                
+                handover_info = get_handover_by_id(handover_id)
+                
+                if handover_info:
+                    st.warning(f"""
+**Thông tin bàn giao:**
+- Người giao: {handover_info['ma_nv']} - {handover_info['ten_nv']}
+- Line: {handover_info['line']} - Ca: {handover_info['ca']}
+- Ngày: {handover_info['ngay']}
+- Trạng thái: {handover_info['trang_thai']}
+
+⚠️ **CẢNH BÁO:** 
+- Hành động này sẽ xóa vĩnh viễn bàn giao và phiếu nhận ca (nếu có)
+- Không thể khôi phục sau khi xóa!
+                    """)
+                    
+                    col_del1, col_del2, col_del3 = st.columns([1, 1, 1])
+                    
+                    with col_del1:
+                        if st.button("🗑️ XÁC NHẬN XÓA", type="primary", use_container_width=True, key="confirm_del_handover"):
+                            with st.spinner("⏳ Đang xóa..."):
+                                success, message = delete_handover(handover_id)
+                            
+                            if success:
+                                st.success(f"✅ {message}")
+                                time.sleep(1)
+                                del st.session_state.deleting_handover_id
+                                if 'search_results' in st.session_state:
+                                    del st.session_state.search_results
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {message}")
+                    
+                    with col_del2:
+                        if st.button("❌ Hủy", use_container_width=True, key="cancel_del_handover"):
+                            del st.session_state.deleting_handover_id
+                            st.rerun()
+                else:
+                    st.error("❌ Không tìm thấy bàn giao")
+                    del st.session_state.deleting_handover_id
+    
+    # TAB 5: CÀI ĐẶT
+    with tab_settings:
         st.header("⚙️ Cài Đặt Hệ Thống")
         
         # Kiểm tra đăng nhập cho trang cài đặt
-        if 'settings_logged_in' not in st.session_state:
-            st.session_state.settings_logged_in = False
+        if 'admin_logged_in' not in st.session_state:
+            st.session_state.admin_logged_in = False
         
-        if not st.session_state.settings_logged_in:
-            st.warning("🔒 Trang này yêu cầu đăng nhập")
+        if not st.session_state.admin_logged_in:
+            st.warning("🔒 Trang này yêu cầu đăng nhập Admin")
             st.markdown("---")
             
             col1, col2, col3 = st.columns([1, 2, 1])
@@ -1387,9 +1792,10 @@ Vui lòng làm mới trang và thử lại.
                         if username and password:
                             success, full_name = check_login(username, password)
                             if success and username == 'admin':
-                                st.session_state.settings_logged_in = True
+                                st.session_state.admin_logged_in = True
                                 st.session_state.admin_name = full_name
                                 st.success(f"Chào mừng {full_name}!")
+                                time.sleep(1)
                                 st.rerun()
                             else:
                                 st.error("❌ Chỉ tài khoản admin mới có quyền truy cập!")
@@ -1403,7 +1809,9 @@ Vui lòng làm mới trang và thử lại.
                 st.success(f"✅ Đang đăng nhập với quyền Admin: **{st.session_state.admin_name}**")
             with col_logout:
                 if st.button("🚪 Đăng xuất", type="secondary"):
-                    st.session_state.settings_logged_in = False
+                    st.session_state.admin_logged_in = False
+                    if 'admin_name' in st.session_state:
+                        del st.session_state.admin_name
                     st.rerun()
             
             st.markdown("---")
@@ -1451,6 +1859,42 @@ Vui lòng làm mới trang và thử lại.
                 
             except Exception as e:
                 st.error(f"❌ Lỗi khi tải cấu hình lines: {e}")
+            
+            st.markdown("---")
+            st.markdown("---")
+            
+            # Thông tin hệ thống
+            st.subheader("ℹ️ Thông Tin Hệ Thống")
+            
+            col_sys1, col_sys2, col_sys3 = st.columns(3)
+            
+            with col_sys1:
+                st.info("""
+**Phiên bản:** 2.0.0
+**Ngày cập nhật:** 2024-01-15
+**Tính năng mới:**
+- ✅ Edit/Xóa bàn giao ca
+- ✅ Quản lý quyền Admin
+- ✅ Tìm kiếm nâng cao
+                """)
+            
+            with col_sys2:
+                try:
+                    total_handovers = len(get_handover_data_for_export())
+                    total_receives = len(get_receive_data_for_export())
+                    
+                    st.metric("Tổng Giao Ca", total_handovers)
+                    st.metric("Tổng Nhận Ca", total_receives)
+                except:
+                    st.warning("Không thể tải thống kê")
+            
+            with col_sys3:
+                st.success("""
+**Hỗ trợ:**
+- 📧 Email: it@company.com
+- 📞 Hotline: 0123-456-789
+- 🌐 Website: company.com
+                """)
 
 if __name__ == "__main__":
     main()
