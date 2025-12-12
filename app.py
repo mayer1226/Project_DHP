@@ -231,27 +231,46 @@ def main():
     
     st.markdown("---")
     
-    # Tabs cho các chức năng - THÊM TAB QUẢN LÝ
-    tabs = ["📊 Dashboard", "📤 Giao Ca", "📥 Nhận Ca", "📈 Xem Dữ Liệu", "⚙️ Cài Đặt"]
-    
-    # Thêm tab Quản Lý nếu là admin
-    if 'admin_logged_in' in st.session_state and st.session_state.admin_logged_in:
-        tabs.insert(4, "🔧 Quản Lý")
-    
-    selected_tabs = st.tabs(tabs)
+# Tabs cho các chức năng
+# Kiểm tra xem có phải admin không
+is_admin = 'admin_logged_in' in st.session_state and st.session_state.admin_logged_in
+
+if is_admin:
+    # Admin: có đầy đủ 6 tabs
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 Dashboard", 
+        "📤 Giao Ca", 
+        "📥 Nhận Ca", 
+        "📈 Xem Dữ Liệu",
+        "🔧 Quản Lý",
+        "⚙️ Cài Đặt"
+    ])
     
     # Mapping tabs
-    tab_dashboard = selected_tabs[0]
-    tab_handover = selected_tabs[1]
-    tab_receive = selected_tabs[2]
-    tab_view_data = selected_tabs[3]
+    tab_dashboard = tab1
+    tab_handover = tab2
+    tab_receive = tab3
+    tab_view_data = tab4
+    tab_manage = tab5
+    tab_settings = tab6
+else:
+    # User thường: chỉ có 5 tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Dashboard", 
+        "📤 Giao Ca", 
+        "📥 Nhận Ca", 
+        "📈 Xem Dữ Liệu",
+        "⚙️ Cài Đặt"
+    ])
     
-    if len(selected_tabs) == 6:  # Có tab Quản Lý
-        tab_manage = selected_tabs[4]
-        tab_settings = selected_tabs[5]
-    else:
-        tab_manage = None
-        tab_settings = selected_tabs[4]
+    # Mapping tabs
+    tab_dashboard = tab1
+    tab_handover = tab2
+    tab_receive = tab3
+    tab_view_data = tab4
+    tab_manage = None  # Không có tab quản lý
+    tab_settings = tab5
+
     
     # TAB 0: DASHBOARD
     with tab_dashboard:
@@ -1898,3 +1917,4 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     main()
+
