@@ -231,48 +231,33 @@ def main():
     
     st.markdown("---")
     
-# Tabs cho các chức năng
-# Kiểm tra xem có phải admin không
-is_admin = 'admin_logged_in' in st.session_state and st.session_state.admin_logged_in
-
-if is_admin:
-    # Admin: có đầy đủ 6 tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Dashboard", 
-        "📤 Giao Ca", 
-        "📥 Nhận Ca", 
-        "📈 Xem Dữ Liệu",
-        "🔧 Quản Lý",
-        "⚙️ Cài Đặt"
-    ])
+    # ===== TẠO TABS DỰA TRÊN QUYỀN =====
+    is_admin = 'admin_logged_in' in st.session_state and st.session_state.admin_logged_in
     
-    # Mapping tabs
-    tab_dashboard = tab1
-    tab_handover = tab2
-    tab_receive = tab3
-    tab_view_data = tab4
-    tab_manage = tab5
-    tab_settings = tab6
-else:
-    # User thường: chỉ có 5 tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Dashboard", 
-        "📤 Giao Ca", 
-        "📥 Nhận Ca", 
-        "📈 Xem Dữ Liệu",
-        "⚙️ Cài Đặt"
-    ])
+    if is_admin:
+        # Admin: có đầy đủ 6 tabs
+        tabs = st.tabs([
+            "📊 Dashboard", 
+            "📤 Giao Ca", 
+            "📥 Nhận Ca", 
+            "📈 Xem Dữ Liệu",
+            "🔧 Quản Lý",
+            "⚙️ Cài Đặt"
+        ])
+        tab_dashboard, tab_handover, tab_receive, tab_view_data, tab_manage, tab_settings = tabs
+    else:
+        # User thường: chỉ có 5 tabs
+        tabs = st.tabs([
+            "📊 Dashboard", 
+            "📤 Giao Ca", 
+            "📥 Nhận Ca", 
+            "📈 Xem Dữ Liệu",
+            "⚙️ Cài Đặt"
+        ])
+        tab_dashboard, tab_handover, tab_receive, tab_view_data, tab_settings = tabs
+        tab_manage = None
     
-    # Mapping tabs
-    tab_dashboard = tab1
-    tab_handover = tab2
-    tab_receive = tab3
-    tab_view_data = tab4
-    tab_manage = None  # Không có tab quản lý
-    tab_settings = tab5
-
-    
-    # TAB 0: DASHBOARD
+    # ===== TAB 0: DASHBOARD =====
     with tab_dashboard:
         st.header("📊 Dashboard - Tổng Quan Bàn Giao Ca")
         
@@ -469,7 +454,7 @@ else:
                             st.session_state.dashboard_show_all = True
                             st.rerun()
     
-    # TAB 1: GIAO CA
+    # ===== TAB 1: GIAO CA =====
     with tab_handover:
         st.header("📤 Thực Hiện Giao Ca")
         
@@ -807,7 +792,7 @@ else:
                             """)
 
     
-    # TAB 2: NHẬN CA
+    # ===== TAB 2: NHẬN CA =====
     with tab_receive:
         st.header("📥 Nhận Ca Làm Việc")
         
@@ -1195,7 +1180,7 @@ Vui lòng làm mới trang và thử lại.
 3. Kiểm tra kết nối internet
                                     """)
     
-    # TAB 3: XEM DỮ LIỆU
+    # ===== TAB 3: XEM DỮ LIỆU =====
     with tab_view_data:
         st.header("📈 Xem Dữ Liệu Bàn Giao Ca")
         
@@ -1423,21 +1408,7 @@ Vui lòng làm mới trang và thử lại.
             except Exception as e:
                 st.error(f"Lỗi khi đọc dữ liệu: {e}")
     
-    # TAB 4: QUẢN LÝ (CHỈ HIỂN THỊ KHI LÀ ADMIN)
-    if tab_manage is not None:
-        with tab_manage:
-            # Phần này sẽ được tiếp tục trong phần 2 do giới hạn độ dài
-            pass
-    
-    # TAB 5: CÀI ĐẶT
-    with tab_settings:
-        # Phần này sẽ được tiếp tục trong phần 2
-        pass
-
-if __name__ == "__main__":
-    main()
-
-    # TAB 4: QUẢN LÝ (CHỈ HIỂN THỊ KHI LÀ ADMIN)
+    # ===== TAB 4: QUẢN LÝ (CHỈ HIỂN THỊ KHI LÀ ADMIN) =====
     if tab_manage is not None:
         with tab_manage:
             st.header("🔧 Quản Lý Bàn Giao Ca")
@@ -1788,7 +1759,7 @@ if __name__ == "__main__":
                     st.error("❌ Không tìm thấy bàn giao")
                     del st.session_state.deleting_handover_id
     
-    # TAB 5: CÀI ĐẶT
+    # ===== TAB 5: CÀI ĐẶT =====
     with tab_settings:
         st.header("⚙️ Cài Đặt Hệ Thống")
         
@@ -1917,4 +1888,3 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     main()
-
