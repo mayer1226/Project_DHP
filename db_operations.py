@@ -617,3 +617,296 @@ def get_combined_handover_receive_data(from_date, to_date, line_filter=None, sta
     except Exception as e:
         print(f"Error getting combined data: {e}")
         return []
+# ===== ADMIN OPERATIONS - EDIT/DELETE =====
+
+def get_handover_by_id(handover_id):
+    """
+    Lấy thông tin chi tiết handover theo ID
+    Returns: dict hoặc None
+    """
+    try:
+        with get_db() as db:
+            handover = db.query(Handover).filter(
+                Handover.handover_id == handover_id
+            ).first()
+            
+            if not handover:
+                return None
+            
+            return {
+                'handover_id': handover.handover_id,
+                'ma_nv': handover.ma_nv_giao_ca,
+                'ten_nv': handover.ten_nv_giao_ca,
+                'line': handover.line,
+                'ca': handover.ca,
+                'chu_ky': handover.nhan_vien_thuoc_ca,
+                'ngay': handover.ngay_bao_cao,
+                'thoi_gian': handover.thoi_gian_giao_ca,
+                'trang_thai': handover.trang_thai_nhan,
+                '5S - Tình Trạng': handover.status_5s,
+                '5S - Comments': handover.comment_5s or '',
+                'An Toàn - Tình Trạng': handover.status_an_toan,
+                'An Toàn - Comments': handover.comment_an_toan or '',
+                'Chất Lượng - Tình Trạng': handover.status_chat_luong,
+                'Chất Lượng - Comments': handover.comment_chat_luong or '',
+                'Thiết Bị - Tình Trạng': handover.status_thiet_bi,
+                'Thiết Bị - Comments': handover.comment_thiet_bi or '',
+                'Kế Hoạch - Tình Trạng': handover.status_ke_hoach,
+                'Kế Hoạch - Comments': handover.comment_ke_hoach or '',
+                'Khác - Tình Trạng': handover.status_khac,
+                'Khác - Comments': handover.comment_khac or ''
+            }
+    except Exception as e:
+        print(f"Error getting handover by ID: {e}")
+        return None
+
+
+def update_handover(handover_id, data):
+    """
+    Cập nhật thông tin handover
+    
+    Args:
+        handover_id: ID của handover cần update
+        data: dict chứa thông tin cần update
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        with get_db() as db:
+            # Tìm handover
+            handover = db.query(Handover).filter(
+                Handover.handover_id == handover_id
+            ).first()
+            
+            if not handover:
+                return False, "Không tìm thấy bàn giao"
+            
+            # Kiểm tra xem đã được nhận chưa
+            if handover.trang_thai_nhan == 'Đã nhận':
+                return False, "Không thể sửa bàn giao đã được nhận. Vui lòng xóa phiếu nhận ca trước."
+            
+            # Update thông tin
+            handover.ma_nv_giao_ca = data.get('ma_nv', handover.ma_nv_giao_ca)
+            handover.ten_nv_giao_ca = data.get('ten_nv', handover.ten_nv_giao_ca)
+            handover.line = data.get('line', handover.line)
+            handover.ca = data.get('ca', handover.ca)
+            handover.nhan_vien_thuoc_ca = data.get('chu_ky', handover.nhan_vien_thuoc_ca)
+            
+            if 'ngay' in data:
+                handover.ngay_bao_cao = datetime.strptime(data['ngay'], '%Y-%m-%d')
+            
+            # Update các hạng mục
+            handover.status_5s = data.get('5S - Tình Trạng', handover.status_5s)
+            handover.comment_5s = data.get('5S - Comments', handover.comment_5s)
+            handover.status_an_toan = data.get('An Toàn - Tình Trạng', handover.status_an_toan)
+            handover.comment_an_toan = data.get('An Toàn - Comments', handover.comment_an_toan)
+            handover.status_chat_luong = data.get('Chất Lượng - Tình Trạng', handover.status_chat_luong)
+            handover.comment_chat_luong = data.get('Chất Lượng - Comments', handover.comment_chat_luong)
+            handover.status_thiet_bi = data.get('Thiết Bị - Tình Trạng', handover.status_thiet_bi)
+            handover.comment_thiet_bi = data.get('Thiết Bị - Comments', handover.comment_thiet_bi)
+            handover.status_ke_hoach = data.get('Kế Hoạch - Tình Trạng', handover.status_ke_hoach)
+            handover.comment_ke_hoach = data.get('Kế Hoạch - Comments', handover.comment_ke_hoach)
+            handover.status_khac = data.get('Khác - Tình Trạng', handover.status_khac)
+            handover.comment_khac = data.get('Khác - Comments', handover.comment_khac)
+            
+            db.flush()
+            
+            return True, "Cập nhật thành công"
+            
+    except Exception as e:
+        print(f"Error updating handover: {e}")
+        return False, f"Lỗi: {str(e)}"
+
+
+def delete_handover(handover_id):
+    """
+    Xóa handover và receive liên quan
+    
+    Args:
+        handover_id: ID của handover cần xóa
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        with get_db() as db:
+            # Tìm handover
+            handover = db.query(Handover).filter(
+                Handover.handover_id == handover_id
+            ).first()
+            
+            if not handover:
+                return False, "Không tìm thấy bàn giao"
+            
+            # Xóa receive liên quan (nếu có)
+            db.query(Receive).filter(
+                Receive.handover_id == handover_id
+            ).delete()
+            
+            # Xóa handover
+            db.delete(handover)
+            db.flush()
+            
+            return True, "Đã xóa bàn giao thành công"
+            
+    except Exception as e:
+        print(f"Error deleting handover: {e}")
+        return False, f"Lỗi: {str(e)}"
+
+
+def get_receive_by_handover_id(handover_id):
+    """
+    Lấy thông tin receive theo handover_id
+    Returns: dict hoặc None
+    """
+    try:
+        with get_db() as db:
+            receive = db.query(Receive).filter(
+                Receive.handover_id == handover_id
+            ).first()
+            
+            if not receive:
+                return None
+            
+            return {
+                'id': receive.id,
+                'ma_nv': receive.ma_nv_nhan_ca,
+                'ten_nv': receive.ten_nv_nhan_ca,
+                'line': receive.line,
+                'ca': receive.ca,
+                'chu_ky': receive.nhan_vien_thuoc_ca,
+                'ngay': receive.ngay_nhan_ca,
+                'thoi_gian': receive.thoi_gian_nhan_ca,
+                'handover_id': receive.handover_id,
+                '5S - Xác Nhận': receive.xac_nhan_5s,
+                '5S - Comments': receive.comment_5s or '',
+                'An Toàn - Xác Nhận': receive.xac_nhan_an_toan,
+                'An Toàn - Comments': receive.comment_an_toan or '',
+                'Chất Lượng - Xác Nhận': receive.xac_nhan_chat_luong,
+                'Chất Lượng - Comments': receive.comment_chat_luong or '',
+                'Thiết Bị - Xác Nhận': receive.xac_nhan_thiet_bi,
+                'Thiết Bị - Comments': receive.comment_thiet_bi or '',
+                'Kế Hoạch - Xác Nhận': receive.xac_nhan_ke_hoach,
+                'Kế Hoạch - Comments': receive.comment_ke_hoach or '',
+                'Khác - Xác Nhận': receive.xac_nhan_khac,
+                'Khác - Comments': receive.comment_khac or ''
+            }
+    except Exception as e:
+        print(f"Error getting receive by handover_id: {e}")
+        return None
+
+
+def delete_receive(handover_id):
+    """
+    Xóa phiếu nhận ca và cập nhật trạng thái handover
+    
+    Args:
+        handover_id: ID của handover
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        with get_db() as db:
+            # Xóa receive
+            deleted = db.query(Receive).filter(
+                Receive.handover_id == handover_id
+            ).delete()
+            
+            if deleted == 0:
+                return False, "Không tìm thấy phiếu nhận ca"
+            
+            # Cập nhật trạng thái handover về "Chưa nhận"
+            handover = db.query(Handover).filter(
+                Handover.handover_id == handover_id
+            ).first()
+            
+            if handover:
+                handover.trang_thai_nhan = 'Chưa nhận'
+            
+            db.flush()
+            
+            return True, "Đã xóa phiếu nhận ca thành công"
+            
+    except Exception as e:
+        print(f"Error deleting receive: {e}")
+        return False, f"Lỗi: {str(e)}"
+
+
+def search_handovers(search_term=None, from_date=None, to_date=None, line=None, status=None, limit=50):
+    """
+    Tìm kiếm handovers với nhiều tiêu chí
+    
+    Args:
+        search_term: Tìm theo ID, mã NV, tên NV
+        from_date: Từ ngày (YYYY-MM-DD)
+        to_date: Đến ngày (YYYY-MM-DD)
+        line: Lọc theo line
+        status: Lọc theo trạng thái nhận
+        limit: Giới hạn số kết quả
+    
+    Returns:
+        List of dict
+    """
+    try:
+        with get_db() as db:
+            query = db.query(Handover)
+            
+            # Tìm kiếm theo search_term
+            if search_term:
+                query = query.filter(
+                    or_(
+                        Handover.handover_id.like(f'%{search_term}%'),
+                        Handover.ma_nv_giao_ca.like(f'%{search_term}%'),
+                        Handover.ten_nv_giao_ca.like(f'%{search_term}%')
+                    )
+                )
+            
+            # Lọc theo ngày
+            if from_date:
+                query = query.filter(func.date(Handover.ngay_bao_cao) >= from_date)
+            if to_date:
+                query = query.filter(func.date(Handover.ngay_bao_cao) <= to_date)
+            
+            # Lọc theo line
+            if line and line != "Tất cả":
+                query = query.filter(Handover.line == line)
+            
+            # Lọc theo trạng thái
+            if status and status != "Tất cả":
+                query = query.filter(Handover.trang_thai_nhan == status)
+            
+            # Sắp xếp và giới hạn
+            handovers = query.order_by(Handover.thoi_gian_giao_ca.desc()).limit(limit).all()
+            
+            # Convert to list of dict
+            results = []
+            for h in handovers:
+                # Đếm OK/NOK/NA
+                statuses = [h.status_5s, h.status_an_toan, h.status_chat_luong,
+                           h.status_thiet_bi, h.status_ke_hoach, h.status_khac]
+                ok_count = sum(1 for s in statuses if s == 'OK')
+                nok_count = sum(1 for s in statuses if s == 'NOK')
+                na_count = sum(1 for s in statuses if s == 'NA')
+                
+                results.append({
+                    'ID Giao Ca': h.handover_id,
+                    'Ngày': h.ngay_bao_cao,
+                    'Thời Gian': h.thoi_gian_giao_ca,
+                    'Line': h.line,
+                    'Ca': h.ca,
+                    'Nhóm': h.nhan_vien_thuoc_ca,
+                    'Mã NV': h.ma_nv_giao_ca,
+                    'Tên NV': h.ten_nv_giao_ca,
+                    'OK': ok_count,
+                    'NOK': nok_count,
+                    'NA': na_count,
+                    'Trạng Thái': h.trang_thai_nhan
+                })
+            
+            return results
+            
+    except Exception as e:
+        print(f"Error searching handovers: {e}")
+        return []
